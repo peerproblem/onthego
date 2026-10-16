@@ -19,7 +19,6 @@ import (
 	"github.com/peerproblem/onthego/internal/otgerror"
 	"github.com/peerproblem/onthego/internal/packageotg"
 	"github.com/peerproblem/onthego/internal/snapshot"
-	"gopkg.in/yaml.v3"
 )
 
 const DefaultBackupLimit = 5
@@ -28,6 +27,7 @@ type Result struct {
 	Manifest snapshot.Manifest `json:"manifest"`
 	Root     string            `json:"root"`
 	Backup   string            `json:"backup,omitempty"`
+	Warnings []string          `json:"warnings,omitempty"`
 }
 
 type Backup struct {
@@ -97,22 +97,18 @@ func Config(ctx context.Context, extracted string, m snapshot.Manifest, existing
 		}
 	}
 	if len(data) == 0 {
-		return config.Config{}, restoreError("snapshot has no project configuration", nil)
+		return config.Config{}, incomingPolicyError("snapshot has no project configuration", nil)
 	}
-	var cfg config.Config
-	if e = yaml.Unmarshal(data, &cfg); e != nil {
-		return cfg, restoreError("snapshot project configuration is invalid", e)
+	cfg, e := config.Parse(data)
+	if e != nil {
+		return cfg, incomingPolicyError("snapshot project configuration is invalid", e)
 	}
-	if e = config.ValidateProjectID(cfg.ProjectID); e != nil {
-		return cfg, e
+	if e = config.Validate(cfg); e != nil {
+		return cfg, incomingPolicyError("snapshot project configuration is invalid", e)
 	}
 	if cfg.ProjectID != m.ProjectID {
-		return cfg, restoreError("snapshot project IDs differ", nil)
+		return cfg, incomingPolicyError("snapshot project IDs differ", nil)
 	}
-	if cfg.SchemaVersion != 1 && cfg.SchemaVersion != config.SchemaVersion {
-		return cfg, restoreError("snapshot project schema is unsupported", nil)
-	}
-	cfg.SchemaVersion = config.SchemaVersion
 	return cfg, nil
 }
 
@@ -224,8 +220,19 @@ func validateState(ctx context.Context, root string, m snapshot.Manifest) error 
 	if e != nil {
 		return e
 	}
+	tracked, e := gitx.Tree(ctx, root, m.Git.WorktreeTree)
+	if e != nil {
+		return e
+	}
+	gitPaths := map[string]bool{}
+	for _, entry := range append(tracked, extras...) {
+		gitPaths[entry.Path] = true
+	}
 	files := map[string]snapshot.File{}
 	for _, f := range m.Files {
+		if f.Secret && gitPaths[f.RelativePath] {
+			return packageInvalid("secret path duplicates a Git tree path: "+f.RelativePath, nil)
+		}
 		if !f.Secret {
 			files[f.RelativePath] = f
 		}
@@ -338,6 +345,10 @@ func Apply(ctx context.Context, extracted, root string, m snapshot.Manifest, pre
 		return Result{}, e
 	}
 	addSecretEntries(desired, m.Files)
+	warnings, e := retainUnmanagedPaths(ctx, root, m.RetainedPaths, desired, old)
+	if e != nil {
+		return Result{}, e
+	}
 	if e = checkCollisions(ctx, root, old, desired); e != nil {
 		return Result{}, e
 	}
@@ -352,12 +363,18 @@ func Apply(ctx context.Context, extracted, root string, m snapshot.Manifest, pre
 				secretPaths = append(secretPaths, file.RelativePath)
 			}
 		}
-		backup, e = createBackup(ctx, root, previousManaged, desired, secretPaths, state.Branch)
+		var backupManaged []string
+		for _, path := range previousManaged {
+			if old[path] {
+				backupManaged = append(backupManaged, path)
+			}
+		}
+		backup, e = createBackup(ctx, root, backupManaged, desired, secretPaths, state.Branch)
 		if e != nil {
 			return Result{}, e
 		}
 	}
-	result := Result{Manifest: m, Root: root, Backup: backup}
+	result := Result{Manifest: m, Root: root, Backup: backup, Warnings: warnings}
 	var current map[string]gitx.TreeEntry
 	if backup != "" {
 		saved, err := readBackup(ctx, root, backup)
@@ -412,6 +429,9 @@ func desiredEntries(ctx context.Context, root string, s gitx.WIP) (map[string]gi
 			return nil, e
 		}
 		for _, entry := range entries {
+			if previous, duplicate := out[entry.Path]; duplicate && (previous.Mode != entry.Mode || previous.OID != entry.OID) {
+				return nil, restoreError("incoming Git trees contain conflicting duplicate path: "+entry.Path, nil)
+			}
 			out[entry.Path] = entry
 		}
 	}
@@ -455,8 +475,35 @@ func managedBefore(ctx context.Context, root string, previous []string) (map[str
 }
 
 func checkCollisions(ctx context.Context, root string, old map[string]bool, desired map[string]gitx.TreeEntry) error {
-	if err := checkTreeParents(desired); err != nil {
+	key, err := pathKeyer(root)
+	if err != nil {
 		return err
+	}
+	if err = checkFilesystemPaths(desired, key); err != nil {
+		return err
+	}
+	if head, headErr := gitx.Text(ctx, root, "rev-parse", "--verify", "HEAD"); headErr == nil {
+		entries, treeErr := gitx.Tree(ctx, root, head)
+		if treeErr != nil {
+			return treeErr
+		}
+		tracked := map[string]gitx.TreeEntry{}
+		for _, entry := range entries {
+			tracked[entry.Path] = entry
+		}
+		if err = checkFilesystemPaths(tracked, key); err != nil {
+			return err
+		}
+	}
+	oldKeys := map[string]bool{}
+	for path := range old {
+		oldKeys[key(path)] = true
+	}
+	// The same managed leaf may acquire a new case or normalization spelling.
+	for path := range desired {
+		if oldKeys[key(path)] {
+			old[path] = true
+		}
 	}
 	for path := range desired {
 		if _, e := packageotg.ProjectPath(path); e != nil {
@@ -483,7 +530,7 @@ func checkCollisions(ctx context.Context, root string, old map[string]bool, desi
 						return err
 					}
 					if !same {
-						return restoreError("incoming file would replace unmanaged local path: "+p, nil)
+						return restoreError("incoming file would replace unmanaged local path (possibly left after being no longer managed): "+p, nil)
 					}
 					old[p] = true
 				}
@@ -503,6 +550,19 @@ func applyState(ctx context.Context, root string, s gitx.WIP, files []snapshot.F
 		return e
 	}
 	addSecretEntries(desired, files)
+	key, e := pathKeyer(root)
+	if e != nil {
+		return e
+	}
+	desiredKeys := map[string]bool{}
+	for path := range desired {
+		desiredKeys[key(path)] = true
+	}
+	oldAliases := map[string][]string{}
+	for path := range old {
+		k := key(path)
+		oldAliases[k] = append(oldAliases[k], path)
+	}
 	// Remove only managed leaves. Never recursively remove a local directory.
 	paths := make([]string, 0, len(old))
 	for p := range old {
@@ -513,7 +573,7 @@ func applyState(ctx context.Context, root string, s gitx.WIP, files []snapshot.F
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if _, ok := desired[p]; ok {
+		if desiredKeys[key(p)] {
 			continue
 		}
 		path := filepath.Join(root, filepath.FromSlash(p))
@@ -544,12 +604,29 @@ func applyState(ctx context.Context, root string, s gitx.WIP, files []snapshot.F
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
+	var written []writtenPath
 	for _, p := range paths {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		entry := desired[p]
-		if prior, ok := current[p]; ok && prior.OID == entry.OID && prior.Mode == entry.Mode {
+		path := filepath.Join(root, filepath.FromSlash(p))
+		if info, err := os.Lstat(path); err == nil {
+			if err = checkWrittenAlias(p, info, written); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR) {
+			return err
+		}
+		renamesAlias := false
+		for _, previous := range oldAliases[key(p)] {
+			if previous != p {
+				renamesAlias = true
+				break
+			}
+		}
+		// Equal bytes do not make a case/normalization-only rename a no-op.
+		if prior, ok := current[p]; ok && !renamesAlias && prior.OID == entry.OID && prior.Mode == entry.Mode {
 			if f, ok := metadata[p]; ok && f.Kind != "symlink" {
 				mode := os.FileMode(f.Mode) & 0777
 				if f.Secret {
@@ -568,12 +645,16 @@ func applyState(ctx context.Context, root string, s gitx.WIP, files []snapshot.F
 					}
 				}
 			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			written = append(written, writtenPath{path: p, info: info})
 			continue
 		}
 		if e = packageotg.CheckParents(root, p); e != nil {
 			return e
 		}
-		path := filepath.Join(root, filepath.FromSlash(p))
 		if e = os.MkdirAll(filepath.Dir(path), 0700); e != nil {
 			return e
 		}
@@ -594,17 +675,10 @@ func applyState(ctx context.Context, root string, s gitx.WIP, files []snapshot.F
 		if e != nil {
 			return e
 		}
-		if e = os.Remove(path); e != nil && !os.IsNotExist(e) {
-			return e
-		}
 		if entry.Mode == "120000" {
 			if e = safeLink(p, string(content)); e != nil {
 				return e
 			}
-			if e = os.Symlink(string(content), path); e != nil {
-				return e
-			}
-			continue
 		}
 		mode := os.FileMode(0644)
 		if entry.Mode == "100755" {
@@ -619,9 +693,33 @@ func applyState(ctx context.Context, root string, s gitx.WIP, files []snapshot.F
 				mode = 0600
 			}
 		}
-		if e = os.WriteFile(path, content, mode); e != nil {
+		// On case-insensitive filesystems replacing an existing directory entry
+		// can preserve its old spelling. Rename the managed alias first, which
+		// atomically changes only its name and keeps its contents intact.
+		for _, previous := range oldAliases[key(p)] {
+			if previous != p {
+				previousPath := filepath.Join(root, filepath.FromSlash(previous))
+				if _, err := os.Lstat(previousPath); err == nil {
+					if e = os.Rename(previousPath, path); e != nil {
+						return e
+					}
+				} else if !os.IsNotExist(err) {
+					return err
+				}
+				break
+			}
+		}
+		if e = replaceFile(path, content, mode, entry.Mode == "120000"); e != nil {
 			return e
 		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if err = checkWrittenAlias(p, info, written); err != nil {
+			return err
+		}
+		written = append(written, writtenPath{path: p, info: info})
 	}
 	if _, e = gitx.Run(ctx, root, "read-tree", s.IndexTree); e != nil {
 		return e
@@ -706,7 +804,7 @@ func directoryManaged(root, relative string, old map[string]bool) error {
 		p = filepath.ToSlash(p)
 		if !entry.IsDir() {
 			if !old[p] {
-				return restoreError("incoming file would replace unmanaged local path: "+p, nil)
+				return restoreError("incoming file would replace unmanaged local path (possibly left after being no longer managed): "+p, nil)
 			}
 			return nil
 		}

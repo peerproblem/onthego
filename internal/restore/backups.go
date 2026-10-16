@@ -16,6 +16,7 @@ import (
 
 	"github.com/peerproblem/onthego/internal/fsx"
 	"github.com/peerproblem/onthego/internal/gitx"
+	"github.com/peerproblem/onthego/internal/otgerror"
 	"github.com/peerproblem/onthego/internal/packageotg"
 	"github.com/peerproblem/onthego/internal/snapshot"
 )
@@ -30,6 +31,10 @@ func backupPrefix(root string) string {
 }
 
 func createBackup(ctx context.Context, root string, previous []string, after map[string]gitx.TreeEntry, secrets []string, targetBranch string, additionalRefs ...string) (string, error) {
+	key, e := pathKeyer(root)
+	if e != nil {
+		return "", e
+	}
 	temp, e := tempDir("backup-")
 	if e != nil {
 		return "", e
@@ -41,7 +46,7 @@ func createBackup(ctx context.Context, root string, previous []string, after map
 	}
 	inIndex := map[string]bool{}
 	for _, p := range strings.Split(string(tracked.Stdout), "\x00") {
-		inIndex[p] = true
+		inIndex[key(p)] = true
 	}
 	// A path removed from the index and recreated in the worktree is untracked.
 	// It still needs backing up when incoming tracked changes will replace it.
@@ -55,27 +60,30 @@ func createBackup(ctx context.Context, root string, previous []string, after map
 	}
 	candidates := append([]string(nil), previous...)
 	for p := range after {
-		if !inIndex[p] {
+		if !inIndex[key(p)] {
 			candidates = append(candidates, p)
 		}
 	}
 	for _, f := range entries {
-		if !inIndex[f.Path] {
+		if !inIndex[key(f.Path)] {
 			candidates = append(candidates, f.Path)
 		}
 	}
 	secretSet := map[string]bool{}
 	for _, p := range secrets {
-		secretSet[p] = true
+		secretSet[key(p)] = true
 	}
 	seen := map[string]bool{}
 	var paths []string
 	var files []snapshot.File
 	for _, p := range candidates {
-		if seen[p] {
+		k := key(p)
+		// CaptureWIP already records indexed files with the index's spelling.
+		// Supplemental aliases must not add a second copy to the extra tree.
+		if seen[k] || inIndex[k] {
 			continue
 		}
-		seen[p] = true
+		seen[k] = true
 		if _, e = packageotg.ProjectPath(p); e != nil {
 			return "", e
 		}
@@ -93,6 +101,13 @@ func createBackup(ctx context.Context, root string, previous []string, after map
 		if e = packageotg.CheckParents(root, p); e != nil {
 			return "", e
 		}
+		// Lstat accepts aliases on some filesystems. Keep the actual existing
+		// directory-entry spelling so undo can restore it after a rename.
+		p, e = existingPathSpelling(root, p, key)
+		if e != nil {
+			return "", e
+		}
+		path = filepath.Join(root, filepath.FromSlash(p))
 		f := snapshot.File{RelativePath: p, Mode: uint32(info.Mode().Perm()), Kind: "file", SizeBytes: info.Size()}
 		if info.Mode()&os.ModeSymlink != 0 {
 			f.Kind = "symlink"
@@ -104,7 +119,7 @@ func createBackup(ctx context.Context, root string, previous []string, after map
 				return "", err
 			}
 		}
-		if secretSet[p] {
+		if secretSet[k] {
 			f.Secret = true
 			f.ArchivePath = "secret-files/" + p
 		} else {
@@ -313,7 +328,7 @@ func Undo(ctx context.Context, root, ref string) (Result, error) {
 	}
 	addSecretEntries(current, saved.Files)
 	if e = applyState(ctx, root, b.WIP, b.Files, old, current, secretRoot); e != nil {
-		return result, e
+		return result, &otgerror.Error{Code: otgerror.CodeRestoreFailed, Message: "in-place undo failed; restore with onthego undo", Cause: e, Preserved: inverse}
 	}
 	for branch, tip := range b.BranchRefs {
 		args := []string{"update-ref", branch, tip}

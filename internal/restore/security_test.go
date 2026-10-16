@@ -11,6 +11,7 @@ import (
 
 	"github.com/peerproblem/onthego/internal/gitx"
 	"github.com/peerproblem/onthego/internal/identity"
+	"github.com/peerproblem/onthego/internal/otgerror"
 	"github.com/peerproblem/onthego/internal/packageotg"
 	"github.com/peerproblem/onthego/internal/restore"
 	"github.com/peerproblem/onthego/internal/snapshot"
@@ -93,7 +94,13 @@ func TestRestoreRejectsSelectedPathsThroughGitSymlinksOrMetadata(t *testing.T) {
 			}
 			archive := filepath.Join(base, "snapshot.otg")
 			if err := packageotg.Create(payload, archive, manifest, recipient, signer); err != nil {
-				t.Fatal(err)
+				if otgerror.Public(err).Code != otgerror.CodePackageInvalid {
+					t.Fatal(err)
+				}
+				if data, readErr := os.ReadFile(protected); readErr != nil || string(data) != "keep me" {
+					t.Fatalf("outside file was modified: %q %v", data, readErr)
+				}
+				return
 			}
 			ageIdentity, err := keys.Identity()
 			if err != nil {
