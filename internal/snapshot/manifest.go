@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 type File struct {
 	RelativePath string `json:"relative_path"`
@@ -58,6 +58,8 @@ type Manifest struct {
 	Agent             Agent             `json:"agent"`
 	Toolchain         Toolchain         `json:"toolchain"`
 	PayloadHashes     map[string]string `json:"payload_hashes"`
+	PayloadSizes      map[string]int64  `json:"payload_sizes,omitempty"`
+	RetainedPaths     []string          `json:"retained_paths,omitempty"`
 	SignerPublic      string            `json:"signer_public"`
 }
 
@@ -66,6 +68,8 @@ func (m Manifest) Canonical() ([]byte, error) {
 	copy.SnapshotID = ""
 	copy.ParentSnapshotIDs = append([]string(nil), m.ParentSnapshotIDs...)
 	sort.Strings(copy.ParentSnapshotIDs)
+	copy.RetainedPaths = append([]string(nil), m.RetainedPaths...)
+	sort.Strings(copy.RetainedPaths)
 	copy.Files = append([]File(nil), m.Files...)
 	sort.Slice(copy.Files, func(i, j int) bool { return copy.Files[i].RelativePath < copy.Files[j].RelativePath })
 	return json.Marshal(copy)

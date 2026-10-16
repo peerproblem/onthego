@@ -2,6 +2,7 @@ package packageotg
 
 import (
 	"archive/tar"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -127,11 +128,34 @@ func TestExtractRejectsUnsignedPayloadAndUntrustedSigner(t *testing.T) {
 				expectedSigner = base64.StdEncoding.EncodeToString(other)
 			}
 			archive := filepath.Join(base, "snapshot.otg")
-			if err := Create(payload, archive, manifest, identity.Recipient(), private); err != nil {
+			if test == "unsigned payload" {
+				// The generator rejects unsigned files too; construct hostile input
+				// directly to exercise the receiving boundary.
+				manifest.PayloadSizes, err = PayloadSizesContext(context.Background(), payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				delete(manifest.PayloadSizes, "extra.txt")
+				data, signature := signedManifest(t, manifest, private)
+				archive = rawPackage(t, identity, func(writer *tar.Writer) {
+					if err := writeBytes(writer, "manifest.json", data, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := writeBytes(writer, "manifest.sig", signature, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := writeTree(writer, payload); err != nil {
+						t.Fatal(err)
+					}
+				})
+			} else if err := Create(payload, archive, manifest, identity.Recipient(), private); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := Extract(archive, filepath.Join(base, "out"), identity, expectedSigner); err == nil {
 				t.Fatalf("accepted %s", test)
+			}
+			if _, err := os.Lstat(filepath.Join(base, "out", "extra.txt")); !os.IsNotExist(err) {
+				t.Fatalf("unsigned payload reached disk: %v", err)
 			}
 		})
 	}

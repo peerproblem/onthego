@@ -28,11 +28,13 @@ import (
 )
 
 const (
-	MaxFiles       = 20000
-	MaxPayloadSize = int64(250 << 20)
-	MaxRatio       = int64(200)
-	MaxBundleSize  = int64(64 << 30) // Independent transport safety limit, not workspace payload.
+	MaxFiles        = 20000
+	MaxManifestSize = int64(8 << 20)
+	MaxBundleSize   = int64(64 << 30) // Independent transport safety limit, not workspace payload.
 )
+
+// MaxPayloadSize is shared by packing and extraction. Tests may lower it.
+var MaxPayloadSize = int64(250 << 20)
 
 func Create(payloadDir, output string, manifest snapshot.Manifest, recipient age.Recipient, signer ed25519.PrivateKey) error {
 	return CreateContext(context.Background(), payloadDir, output, manifest, recipient, signer)
@@ -47,6 +49,28 @@ func CreateContext(ctx context.Context, payloadDir, output string, manifest snap
 	if len(signer) != ed25519.PrivateKeySize {
 		return errors.New("invalid Ed25519 signing key")
 	}
+	sizes, err := PayloadSizesContext(ctx, payloadDir)
+	if err != nil {
+		return err
+	}
+	if manifest.SchemaVersion >= 3 {
+		if manifest.PayloadSizes == nil {
+			manifest.PayloadSizes = sizes
+		} else if !equalPayloadSizes(manifest.PayloadSizes, sizes) {
+			return packageError("payload sizes changed before packing", nil)
+		}
+	}
+	if len(sizes) != len(manifest.PayloadHashes) {
+		return packageError("payload files do not match signed manifest", nil)
+	}
+	for path := range sizes {
+		if manifest.PayloadHashes[path] == "" {
+			return packageError("payload file is not covered by manifest: "+path, nil)
+		}
+	}
+	if err := validateManifest(manifest); err != nil {
+		return packageError("manifest paths or payload metadata are invalid", err)
+	}
 	manifest.SignerPublic = base64.StdEncoding.EncodeToString(signer.Public().(ed25519.PublicKey))
 	if err := manifest.SetSnapshotID(); err != nil {
 		return err
@@ -59,6 +83,9 @@ func CreateContext(ctx context.Context, payloadDir, output string, manifest snap
 	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
+	}
+	if int64(len(manifestJSON)) > MaxManifestSize {
+		return packageError("manifest exceeds 8 MiB limit", nil)
 	}
 	if err := checkPayloadLimitsContext(ctx, payloadDir, int64(len(manifestJSON))+int64(base64.StdEncoding.EncodedLen(ed25519.SignatureSize))); err != nil {
 		return err
@@ -127,10 +154,6 @@ func ExtractContext(ctx context.Context, packagePath, outputDir string, ageIdent
 	if err := ctx.Err(); err != nil {
 		return snapshot.Manifest{}, err
 	}
-	packageInfo, err := os.Stat(packagePath)
-	if err != nil {
-		return snapshot.Manifest{}, err
-	}
 	input, err := os.Open(packagePath)
 	if err != nil {
 		return snapshot.Manifest{}, err
@@ -140,7 +163,7 @@ func ExtractContext(ctx context.Context, packagePath, outputDir string, ageIdent
 	if err != nil {
 		return snapshot.Manifest{}, packageError("age decryption failed", err)
 	}
-	zstdReader, err := zstd.NewReader(contextReader{ctx, decrypted}, zstd.WithDecoderMaxMemory(uint64(MaxPayloadSize*2)), zstd.WithDecoderConcurrency(1))
+	zstdReader, err := zstd.NewReader(contextReader{ctx, decrypted}, zstd.WithDecoderMaxMemory(uint64(500<<20)), zstd.WithDecoderConcurrency(1))
 	if err != nil {
 		return snapshot.Manifest{}, packageError("zstd stream is invalid", err)
 	}
@@ -154,9 +177,47 @@ func ExtractContext(ctx context.Context, packagePath, outputDir string, ageIdent
 		return snapshot.Manifest{}, err
 	}
 	tarReader := tar.NewReader(contextReader{ctx, zstdReader})
-	seen := map[string]bool{}
-	var total int64
-	var count int
+	manifestData, err := readManifestEntry(tarReader, "manifest.json")
+	if err != nil {
+		return snapshot.Manifest{}, err
+	}
+	signatureData, err := readManifestEntry(tarReader, "manifest.sig")
+	if err != nil {
+		return snapshot.Manifest{}, err
+	}
+	manifest, err := verifyManifest(manifestData, signatureData, expectedSigner)
+	if err != nil {
+		return snapshot.Manifest{}, err
+	}
+	total := int64(len(manifestData) + len(signatureData))
+	if total > MaxPayloadSize {
+		return snapshot.Manifest{}, packageError("archive extraction limit exceeded", nil)
+	}
+	for name, data := range map[string][]byte{"manifest.json": manifestData, "manifest.sig": signatureData} {
+		file, err := os.OpenFile(filepath.Join(outputDir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return snapshot.Manifest{}, err
+		}
+		_, writeErr := file.Write(data)
+		closeErr := file.Close()
+		if writeErr != nil {
+			return snapshot.Manifest{}, writeErr
+		}
+		if closeErr != nil {
+			return snapshot.Manifest{}, closeErr
+		}
+	}
+	// Older packages contain explicit directory entries, including empty ones.
+	// Schema 2 directories are ignored without materializing them. Schema 3
+	// directory names must derive from authenticated payload paths.
+	directories := map[string]bool{}
+	for name := range manifest.PayloadHashes {
+		for parent := filepath.ToSlash(filepath.Dir(name)); parent != "."; parent = filepath.ToSlash(filepath.Dir(parent)) {
+			directories[parent] = true
+		}
+	}
+	seen := map[string]bool{"manifest.json": true, "manifest.sig": true}
+	count := 2
 	for {
 		if err := ctx.Err(); err != nil {
 			return snapshot.Manifest{}, err
@@ -180,64 +241,72 @@ func ExtractContext(ctx context.Context, packagePath, outputDir string, ageIdent
 		if err := CheckParents(outputDir, name); err != nil {
 			return snapshot.Manifest{}, packageError("archive path traverses a symlink", err)
 		}
+		if header.Typeflag == tar.TypeDir {
+			if header.Size != 0 || (manifest.SchemaVersion >= 3 && !directories[name]) {
+				return snapshot.Manifest{}, packageError("archive directory is not covered by signed payloads", nil)
+			}
+			// Regular file extraction creates authenticated parent directories.
+			continue
+		}
+		if header.Typeflag != tar.TypeReg {
+			return snapshot.Manifest{}, packageError("archive contains unsupported entry type", nil)
+		}
+		if manifest.PayloadHashes[name] == "" {
+			return snapshot.Manifest{}, packageError("archive contains unsigned payload: "+name, nil)
+		}
+		if manifest.SchemaVersion >= 3 && header.Size != manifest.PayloadSizes[name] {
+			return snapshot.Manifest{}, packageError("archive entry size does not match signed manifest: "+name, nil)
+		}
+		if header.Size < 0 {
+			return snapshot.Manifest{}, packageError("archive entry has negative size", nil)
+		}
 		if name == "repo.bundle" {
-			if header.Size < 0 || header.Size > MaxBundleSize {
+			if header.Size > MaxBundleSize {
 				return snapshot.Manifest{}, packageError("Git bundle exceeds transport safety limit", nil)
 			}
 		} else {
+			if header.Size > MaxPayloadSize-total {
+				return snapshot.Manifest{}, packageError("archive extraction limit exceeded", nil)
+			}
 			total += header.Size
 		}
-		if total > MaxPayloadSize || (packageInfo.Size() > 0 && total > packageInfo.Size()*MaxRatio) {
-			return snapshot.Manifest{}, packageError("archive extraction limit exceeded", nil)
-		}
 		destination := filepath.Join(outputDir, filepath.FromSlash(name))
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if info, err := os.Lstat(destination); err == nil && !info.IsDir() {
-				return snapshot.Manifest{}, packageError("archive directory conflicts with an existing file", nil)
-			}
-			if err := os.MkdirAll(destination, 0o700); err != nil {
-				return snapshot.Manifest{}, err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-				return snapshot.Manifest{}, err
-			}
-			mode := fs.FileMode(header.Mode) & 0o777
-			if mode == 0 {
-				mode = 0o600
-			}
-			file, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
-			if err != nil {
-				return snapshot.Manifest{}, err
-			}
-			_, copyErr := io.CopyN(contextWriter{ctx, file}, contextReader{ctx, tarReader}, header.Size)
-			closeErr := file.Close()
-			if copyErr != nil {
-				return snapshot.Manifest{}, packageError("archive entry is truncated", copyErr)
-			}
-			if closeErr != nil {
-				return snapshot.Manifest{}, closeErr
-			}
-		case tar.TypeSymlink:
-			if !strings.HasPrefix(name, "files/") {
-				return snapshot.Manifest{}, packageError("symlinks are allowed only in selected worktree files", nil)
-			}
-			link, err := safeLinkTarget(name, header.Linkname)
-			if err != nil {
-				return snapshot.Manifest{}, packageError("archive contains unsafe symlink", err)
-			}
-			if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-				return snapshot.Manifest{}, err
-			}
-			if err := os.Symlink(link, destination); err != nil {
-				return snapshot.Manifest{}, err
-			}
-		default:
-			return snapshot.Manifest{}, packageError("archive contains unsupported entry type", nil)
+		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+			return snapshot.Manifest{}, err
+		}
+		mode := fs.FileMode(header.Mode) & 0o777
+		if mode == 0 {
+			mode = 0o600
+		}
+		file, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+		if err != nil {
+			return snapshot.Manifest{}, err
+		}
+		_, copyErr := io.CopyN(contextWriter{ctx, file}, contextReader{ctx, tarReader}, header.Size)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return snapshot.Manifest{}, packageError("archive entry is truncated", copyErr)
+		}
+		if closeErr != nil {
+			return snapshot.Manifest{}, closeErr
 		}
 	}
-	return verifyExtractedContext(ctx, outputDir, expectedSigner)
+	return verifyPayloadContext(ctx, outputDir, manifest)
+}
+
+func readManifestEntry(reader *tar.Reader, name string) ([]byte, error) {
+	header, err := reader.Next()
+	if err != nil {
+		return nil, packageError("manifest and signature must be the first two archive entries", err)
+	}
+	if header.Name != name || header.Typeflag != tar.TypeReg || header.Size < 0 || header.Size > MaxManifestSize {
+		return nil, packageError("expected bounded regular archive entry: "+name, nil)
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, MaxManifestSize+1))
+	if err != nil || int64(len(data)) != header.Size {
+		return nil, packageError("manifest entry is truncated", err)
+	}
+	return data, nil
 }
 
 func verifyExtracted(root, expectedSigner string) (snapshot.Manifest, error) {
@@ -252,20 +321,30 @@ func verifyExtractedContext(ctx context.Context, root, expectedSigner string) (s
 	if err != nil {
 		return snapshot.Manifest{}, packageError("manifest missing", err)
 	}
+	signatureText, err := os.ReadFile(filepath.Join(root, "manifest.sig"))
+	if err != nil {
+		return snapshot.Manifest{}, packageError("manifest signature missing", err)
+	}
+	manifest, err := verifyManifest(manifestData, signatureText, expectedSigner)
+	if err != nil {
+		return snapshot.Manifest{}, err
+	}
+	return verifyPayloadContext(ctx, root, manifest)
+}
+
+func verifyManifest(manifestData, signatureText []byte, expectedSigner string) (snapshot.Manifest, error) {
+	if int64(len(manifestData)) > MaxManifestSize || int64(len(signatureText)) > MaxManifestSize {
+		return snapshot.Manifest{}, packageError("manifest entry exceeds 8 MiB limit", nil)
+	}
 	var manifest snapshot.Manifest
 	decoder := json.NewDecoder(strings.NewReader(string(manifestData)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&manifest); err != nil {
 		return snapshot.Manifest{}, packageError("manifest invalid", err)
 	}
-	if manifest.SchemaVersion != snapshot.SchemaVersion || manifest.ProjectID == "" {
-		return snapshot.Manifest{}, packageError("manifest schema is unsupported", nil)
-	}
-	if err := validateManifest(manifest); err != nil {
-		return snapshot.Manifest{}, packageError("manifest paths or payload metadata are invalid", err)
-	}
-	if err := manifest.ValidateID(); err != nil {
-		return snapshot.Manifest{}, packageError(err.Error(), err)
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return snapshot.Manifest{}, packageError("manifest contains trailing JSON", err)
 	}
 	if expectedSigner != "" && manifest.SignerPublic != expectedSigner {
 		return snapshot.Manifest{}, packageError("package signer is not trusted", nil)
@@ -273,10 +352,6 @@ func verifyExtractedContext(ctx context.Context, root, expectedSigner string) (s
 	publicKey, err := identity.ParsePublic(manifest.SignerPublic)
 	if err != nil {
 		return snapshot.Manifest{}, packageError("signer key is invalid", err)
-	}
-	signatureText, err := os.ReadFile(filepath.Join(root, "manifest.sig"))
-	if err != nil {
-		return snapshot.Manifest{}, packageError("manifest signature missing", err)
 	}
 	signature, err := base64.StdEncoding.DecodeString(string(signatureText))
 	if err != nil {
@@ -286,6 +361,16 @@ func verifyExtractedContext(ctx context.Context, root, expectedSigner string) (s
 	if err != nil || !ed25519.Verify(publicKey, canonical, signature) {
 		return snapshot.Manifest{}, packageError("manifest signature verification failed", err)
 	}
+	if err := validateManifest(manifest); err != nil {
+		return snapshot.Manifest{}, packageError("manifest paths or payload metadata are invalid", err)
+	}
+	if err := manifest.ValidateID(); err != nil {
+		return snapshot.Manifest{}, packageError(err.Error(), err)
+	}
+	return manifest, nil
+}
+
+func verifyPayloadContext(ctx context.Context, root string, manifest snapshot.Manifest) (snapshot.Manifest, error) {
 	for path, expected := range manifest.PayloadHashes {
 		if err := verifyFileHashContext(ctx, root, path, expected); err != nil {
 			return snapshot.Manifest{}, err
@@ -322,6 +407,28 @@ func verifyExtractedContext(ctx context.Context, root, expectedSigner string) (s
 }
 
 func validateManifest(manifest snapshot.Manifest) error {
+	if (manifest.SchemaVersion != 2 && manifest.SchemaVersion != snapshot.SchemaVersion) || manifest.ProjectID == "" {
+		return errors.New("manifest schema is unsupported")
+	}
+	if len(manifest.PayloadHashes) > MaxFiles-2 || len(manifest.Files) > MaxFiles || len(manifest.RetainedPaths) > MaxFiles {
+		return errors.New("manifest contains too many paths")
+	}
+	if manifest.SchemaVersion == 2 && (len(manifest.PayloadSizes) != 0 || len(manifest.RetainedPaths) != 0) {
+		return errors.New("schema 2 cannot contain schema 3 metadata")
+	}
+	if manifest.SchemaVersion >= 3 {
+		if len(manifest.PayloadSizes) != len(manifest.PayloadHashes) {
+			return errors.New("payload sizes must cover every signed payload")
+		}
+		for path, size := range manifest.PayloadSizes {
+			if manifest.PayloadHashes[path] == "" || size < 0 {
+				return fmt.Errorf("invalid signed payload size: %s", path)
+			}
+			if path == "repo.bundle" && size > MaxBundleSize {
+				return errors.New("Git bundle exceeds transport safety limit")
+			}
+		}
+	}
 	if !validHash(manifest.Git.BundleSHA256) || manifest.PayloadHashes["repo.bundle"] != manifest.Git.BundleSHA256 {
 		return fmt.Errorf("missing or inconsistent repo.bundle hash")
 	}
@@ -334,7 +441,7 @@ func validateManifest(manifest snapshot.Manifest) error {
 		return fmt.Errorf("snapshot must have at most one direct parent")
 	}
 	for path, hash := range manifest.PayloadHashes {
-		if _, err := safeArchivePath(path); err != nil || !validHash(hash) {
+		if _, err := safeArchivePath(path); err != nil || !validHash(hash) || path == "manifest.json" || path == "manifest.sig" {
 			return fmt.Errorf("invalid payload path or hash: %s", path)
 		}
 	}
@@ -370,6 +477,14 @@ func validateManifest(manifest snapshot.Manifest) error {
 			return fmt.Errorf("unsupported selected file kind: %s", file.Kind)
 		}
 	}
+	retained := map[string]bool{}
+	for _, path := range manifest.RetainedPaths {
+		rel, err := ProjectPath(path)
+		if err != nil || retained[rel] || seen[rel] {
+			return fmt.Errorf("unsafe, duplicate, or selected retained path: %s", path)
+		}
+		retained[rel] = true
+	}
 	return nil
 }
 
@@ -378,12 +493,62 @@ func validHash(value string) bool {
 	return err == nil && len(decoded) == sha256.Size
 }
 
+// PayloadSizesContext records the exact regular-file sizes that schema 3 signs.
+// Capture calls this before assigning the snapshot ID; Create checks it again.
+func PayloadSizesContext(ctx context.Context, root string) (map[string]int64, error) {
+	sizes := map[string]int64{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return packageError("payload must be a regular file", nil)
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		name, err := safeArchivePath(filepath.ToSlash(rel))
+		if err != nil || name == "manifest.json" || name == "manifest.sig" {
+			return packageError("payload contains reserved or unsafe path", err)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		sizes[name] = info.Size()
+		return nil
+	})
+	return sizes, err
+}
+
+func equalPayloadSizes(left, right map[string]int64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for name, size := range left {
+		if actual, ok := right[name]; !ok || actual != size {
+			return false
+		}
+	}
+	return true
+}
+
 func checkPayloadLimits(root string, manifestBytes int64) error {
 	return checkPayloadLimitsContext(context.Background(), root, manifestBytes)
 }
 
 func checkPayloadLimitsContext(ctx context.Context, root string, manifestBytes int64) error {
 	total, count := manifestBytes, 2 // manifest.json and manifest.sig
+	if total > MaxPayloadSize {
+		return packageError("snapshot exceeds expanded payload limit", nil)
+	}
 	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -431,7 +596,7 @@ func writeTreeContext(ctx context.Context, writer *tar.Writer, root string) erro
 		if walkErr != nil {
 			return walkErr
 		}
-		if path != root {
+		if path != root && !entry.IsDir() {
 			paths = append(paths, path)
 		}
 		return nil
