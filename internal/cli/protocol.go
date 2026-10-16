@@ -56,7 +56,7 @@ func peerJSON(ctx context.Context, d config.Device, args []string, input io.Read
 
 const protocolMajor = 3
 
-var protocolCapabilities = []string{"git-wip", "incremental-bundle", "mutual-trust", "session-policy", "idempotent-apply"}
+var protocolCapabilities = []string{"git-wip", "incremental-bundle", "mutual-trust", "session-policy", "idempotent-apply", "snapshot-v3", "session-scope"}
 
 type helloResponse struct {
 	ProtocolMajor int      `json:"protocol_major"`

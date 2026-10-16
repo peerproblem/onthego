@@ -266,7 +266,23 @@ func TestCLIIntegration(t *testing.T) {
 		if len(backups) != 1 || !strings.HasPrefix(backups[0].Ref, "refs/onthego/backup/") {
 			t.Fatalf("backups = %+v", backups)
 		}
-		b.mustRun(t, "undo", backups[0].Ref)
+		backupRef := backups[0].Ref
+		backupCommit := strings.TrimSpace(b.git(t, "rev-parse", backupRef))
+		if err := os.Remove(filepath.Join(b.root, ".onthego.yaml")); err != nil {
+			t.Fatal(err)
+		}
+		_, stderr, err := b.run(t, "status")
+		if err == nil || !strings.Contains(stderr, "onthego undo") || !strings.Contains(stderr, "new project ID") {
+			t.Fatalf("missing policy guidance: %v %s", err, stderr)
+		}
+		b.mustRun(t, "backups", "list")
+		b.mustRun(t, "undo", backupRef)
+		for _, malformed := range []string{"agent: [", "schema_version: 2\nproject_id: ../unsafe\nagent: auto\n"} {
+			b.git(t, "update-ref", backupRef, backupCommit)
+			writeFixture(t, filepath.Join(b.root, ".onthego.yaml"), malformed)
+			b.mustRun(t, "backups", "list")
+			b.mustRun(t, "undo", backupRef)
+		}
 		assertFile(t, filepath.Join(b.root, "tracked.txt"), "original\n")
 		b.mustRun(t, "backups", "prune", "--keep", "0")
 		decodeJSON(t, b.mustRun(t, "--json", "backups", "list"), &backups)
@@ -301,6 +317,116 @@ func TestCLIIntegration(t *testing.T) {
 		a.mustRun(t, "pull", "laptop")
 		assertUnchangedStatus(t, a.mustRun(t, "--json", "status"))
 		assertUnchangedStatus(t, a.mustRun(t, "--json", "status", "laptop"))
+	})
+
+	t.Run("SessionRecoveryCommand", func(t *testing.T) {
+		base := t.TempDir()
+		a := newMachine(t, base, "desktop", binary)
+		b := newMachine(t, base, "laptop", binary)
+		makeRepository(t, a)
+		a.mustRun(t, "init")
+		writeFixture(t, filepath.Join(a.codex, "sessions", "native.jsonl"), jsonLine(t, map[string]any{"type": "session_meta", "payload": map[string]any{"id": "recovery-id", "cwd": a.root}}))
+		writeFixture(t, b.codex, "home temporarily unavailable")
+		a.mustRun(t, "device", "add", "laptop", "--local-path", b.root, "--binary", b.wrapper(t))
+		var result struct {
+			Sessions struct {
+				Status   string `json:"status"`
+				Imported int    `json:"imported"`
+			} `json:"sessions"`
+			SessionsRetried bool `json:"sessions_retried"`
+		}
+		decodeJSON(t, a.mustRun(t, "--json", "push", "laptop"), &result)
+		if result.Sessions.Status != "recovery_needed" {
+			t.Fatalf("initial import=%+v", result)
+		}
+		var status struct {
+			Pending bool `json:"session_recovery_pending"`
+		}
+		decodeJSON(t, b.mustRun(t, "--json", "status"), &status)
+		if !status.Pending || !strings.Contains(b.mustRun(t, "status"), "onthego sessions recover") {
+			t.Fatal("status omitted session recovery")
+		}
+		writeFixture(t, filepath.Join(b.root, "tracked.txt"), "local edits preserved during recovery\n")
+		if err := os.Remove(b.codex); err != nil {
+			t.Fatal(err)
+		}
+		decodeJSON(t, b.mustRun(t, "--json", "sessions", "recover", "--session-conflict", "keep-both"), &result)
+		if !result.SessionsRetried || result.Sessions.Imported != 1 {
+			t.Fatalf("retry=%+v", result)
+		}
+		assertFile(t, filepath.Join(b.root, "tracked.txt"), "local edits preserved during recovery\n")
+		assertJSONLContains(t, filepath.Join(b.codex, "sessions", "native.jsonl"), "cwd", b.root)
+		decodeJSON(t, b.mustRun(t, "--json", "status"), &status)
+		if status.Pending {
+			t.Fatal("recovered sessions still pending")
+		}
+	})
+
+	t.Run("SessionScopeAndDiagnostics", func(t *testing.T) {
+		base := t.TempDir()
+		a := newMachine(t, base, "desktop", binary)
+		b := newMachine(t, base, "laptop", binary)
+		makeRepository(t, a)
+		a.mustRun(t, "init")
+		sessionPath := filepath.Join(a.codex, "sessions", "native.jsonl")
+		original := jsonLine(t, map[string]any{"type": "session_meta", "payload": map[string]any{"id": "native-id", "cwd": a.root}})
+		writeFixture(t, sessionPath, original)
+		writeFixture(t, filepath.Join(a.codex, "sessions", "malformed.jsonl"), jsonLine(t, map[string]any{"type": "session_meta", "payload": map[string]any{"id": "malformed-id", "cwd": a.root}})+"not JSON and never printed\n")
+		writeFixture(t, filepath.Join(a.root, ".env"), "PRIVATE_TOKEN=not-printed\n")
+		var inspect struct {
+			Sessions []agentsessions.Session `json:"sessions"`
+			Warnings []string                `json:"session_warnings"`
+		}
+		text := a.mustRun(t, "--json", "inspect")
+		decodeJSON(t, text, &inspect)
+		if len(inspect.Sessions) != 1 || len(inspect.Warnings) != 1 || !strings.Contains(text, "ignored secret candidate") || strings.Contains(text, "never printed") {
+			t.Fatalf("inspect=%s", text)
+		}
+		var preview struct {
+			Sessions   []agentsessions.Session `json:"sessions"`
+			Warnings   []string                `json:"warnings"`
+			NotChecked []string                `json:"not_checked"`
+		}
+		decodeJSON(t, a.mustRun(t, "--json", "snapshot", "pack", "--dry-run"), &preview)
+		if len(preview.Sessions) != 1 || len(preview.Warnings) != 1 || strings.Join(preview.NotChecked, ",") != "peer,destination_conflict" {
+			t.Fatalf("preview=%+v", preview)
+		}
+		decodeJSON(t, a.mustRun(t, "--json", "snapshot", "pack", "--dry-run", "--no-sessions"), &preview)
+		if len(preview.Sessions) != 0 || len(preview.Warnings) != 0 {
+			t.Fatalf("no-session preview=%+v", preview)
+		}
+		for _, extra := range [][]string{{"--dry-run"}, {"--output", filepath.Join(base, "missing.otg")}} {
+			args := append([]string{"--json", "snapshot", "pack", "--session", "missing-id"}, extra...)
+			_, stderr, err := a.run(t, args...)
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 2 || !strings.Contains(stderr, "E_INPUT") || !strings.Contains(stderr, "missing-id") {
+				t.Fatalf("missing session: %v %s", err, stderr)
+			}
+		}
+		var packed struct {
+			Warnings []string `json:"warnings"`
+		}
+		decodeJSON(t, a.mustRun(t, "--json", "snapshot", "pack", "--output", filepath.Join(base, "warnings.otg")), &packed)
+		if len(packed.Warnings) == 0 {
+			t.Fatal("pack discarded malformed-session warning")
+		}
+		a.mustRun(t, "device", "add", "laptop", "--local-path", b.root, "--binary", b.wrapper(t))
+		output := a.mustRun(t, "--json", "push", "laptop", "--no-sessions")
+		if strings.Contains(output, "malformed.jsonl") {
+			t.Fatalf("no-sessions searched native histories: %s", output)
+		}
+		assertAbsent(t, b.codex)
+		assertAbsent(t, b.claude)
+		writeFixture(t, filepath.Join(b.codex, "sessions", "receiver.jsonl"), jsonLine(t, map[string]any{"type": "session_meta", "payload": map[string]any{"id": "receiver-id", "cwd": b.root}}))
+		writeFixture(t, filepath.Join(b.root, "tracked.txt"), "continued without sessions\n")
+		a.mustRun(t, "pull", "laptop", "--no-sessions", "--session-conflict", "skip")
+		assertAbsent(t, filepath.Join(a.codex, "sessions", "receiver.jsonl"))
+		assertFile(t, sessionPath, original)
+		aliasOutput, stderr, err := a.run(t, "--json", "push", "laptop", "--dry-run", "--sessions", "skip", "--no-sessions")
+		if err != nil || !strings.Contains(stderr, "deprecated") || !strings.Contains(stderr, "--session-conflict") {
+			t.Fatalf("alias warning=%s, %v", stderr, err)
+		}
+		decodeJSON(t, aliasOutput, &preview)
 	})
 
 }

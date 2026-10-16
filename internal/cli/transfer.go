@@ -11,6 +11,8 @@ import (
 	"github.com/peerproblem/onthego/internal/config"
 	"github.com/peerproblem/onthego/internal/fsx"
 	"github.com/peerproblem/onthego/internal/identity"
+	"github.com/peerproblem/onthego/internal/otgerror"
+	"github.com/peerproblem/onthego/internal/packageotg"
 	"github.com/peerproblem/onthego/internal/syncer"
 	"github.com/spf13/cobra"
 )
@@ -35,10 +37,19 @@ func addSelectionFlags(c *cobra.Command, selection *agentsessions.Selection) {
 	c.Flags().StringSliceVar(&selection.IDs, "session", nil, "native session ID to carry (repeatable)")
 	c.Flags().BoolVar(&selection.All, "all-sessions", false, "carry all project sessions instead of recent sessions")
 	c.Flags().IntVar(&selection.RecentDays, "session-days", 7, "carry sessions active in the last N days")
-	c.MarkFlagsMutuallyExclusive("session", "all-sessions")
+	c.Flags().BoolVar(&selection.None, "no-sessions", false, "exclude native agent sessions from the handoff")
+	c.PreRunE = func(c *cobra.Command, _ []string) error {
+		if c.Flags().Changed("session") && len(selection.IDs) == 0 {
+			return otgerror.New(otgerror.CodeInput, "session ID must not be blank")
+		}
+		return nil
+	}
 }
 func sessionArgs(selection agentsessions.Selection) []string {
 	var args []string
+	if selection.None {
+		return []string{"--no-sessions"}
+	}
 	for _, id := range selection.IDs {
 		args = append(args, "--session", id)
 	}
@@ -56,7 +67,7 @@ func (a *app) pushCommand() *cobra.Command {
 	var selection agentsessions.Selection
 	var policy string
 	c := &cobra.Command{Use: "push <device>", Aliases: []string{"pass"}, Args: cobra.ExactArgs(1), Short: "Hand off workspace changes and native agent sessions to a paired device", RunE: func(c *cobra.Command, args []string) error {
-		if err := validateSessionPolicy(policy); err != nil {
+		if err := validateTransferOptions(selection, policy, include, secrets); err != nil {
 			return err
 		}
 		root, cfg, err := loadProject()
@@ -72,14 +83,10 @@ func (a *app) pushCommand() *cobra.Command {
 			return err
 		}
 		if d.LocalPath != "" && filepath.Clean(d.LocalPath) == filepath.Clean(root) {
-			return errors.New("source and destination are the same project directory")
+			return otgerror.New(otgerror.CodeInput, "source and destination are the same project directory")
 		}
 		if dry {
-			files, err := syncer.Preview(c.Context(), root, include, secrets)
-			if err != nil {
-				return err
-			}
-			return a.print(c, map[string]any{"dry_run": true, "selected_files": files, "device": args[0]}, renderPreview(files, "Destination: "+args[0]))
+			return a.printDryRun(c, root, cfg, selection, include, secrets, args[0])
 		}
 		files, err := syncer.Preview(c.Context(), root, include, secrets)
 		if err != nil {
@@ -138,6 +145,7 @@ func (a *app) pushCommand() *cobra.Command {
 		if err = syncer.MarkSyncedPeer(c.Context(), root, m.SnapshotID, args[0]); err != nil {
 			return fmt.Errorf("peer received snapshot, but local handoff receipt could not be saved: %w", err)
 		}
+		result.Warnings = append(result.Warnings, m.Warnings...)
 		for _, path := range excluded {
 			result.Warnings = append(result.Warnings, "Excluded secret candidate: "+path+"; use --include-secret <path> for permitted files")
 		}
@@ -147,7 +155,7 @@ func (a *app) pushCommand() *cobra.Command {
 	c.Flags().StringSliceVar(&secrets, "include-secret", nil, "explicitly include a secret file in encrypted handoffs")
 	c.Flags().BoolVar(&replace, "replace", false, "replace conflicting managed state after preserving a Git backup")
 	c.Flags().BoolVar(&dry, "dry-run", false, "preview selection without changing a baseline")
-	c.Flags().StringVar(&policy, "sessions", "keep-both", "divergent session policy: skip, theirs, or keep-both")
+	addSessionPolicyFlags(c, &policy)
 	addSelectionFlags(c, &selection)
 	return c
 }
@@ -156,7 +164,7 @@ func (a *app) pullCommand() *cobra.Command {
 	var replace bool
 	var selection agentsessions.Selection
 	c := &cobra.Command{Use: "pull <device>", Args: cobra.ExactArgs(1), Short: "Receive a workspace and agent-session handoff from a paired device", RunE: func(c *cobra.Command, args []string) error {
-		if err := validateSessionPolicy(policy); err != nil {
+		if err := validateTransferOptions(selection, policy, nil, nil); err != nil {
 			return err
 		}
 		d, err := device(args[0])
@@ -166,7 +174,7 @@ func (a *app) pullCommand() *cobra.Command {
 		projectRoot, cfg, projectErr := loadProject()
 		if output == "" {
 			if projectErr != nil {
-				return errors.New("use --output /absolute/project for a first pull, or run inside an initialized project")
+				return otgerror.New(otgerror.CodeInput, "use --output /absolute/project for a first pull, or run inside an initialized project")
 			}
 			output = projectRoot
 		}
@@ -186,7 +194,7 @@ func (a *app) pullCommand() *cobra.Command {
 			}
 			rel, err := filepath.Rel(home, output)
 			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return errors.New("first pull outside HOME requires --remote-path")
+				return otgerror.New(otgerror.CodeInput, "first pull outside HOME requires --remote-path")
 			}
 			if d.Local {
 				d.LocalPath = filepath.Join(d.Home, rel)
@@ -196,7 +204,7 @@ func (a *app) pullCommand() *cobra.Command {
 		}
 		if remotePath != "" {
 			if !filepath.IsAbs(remotePath) {
-				return errors.New("--remote-path must be absolute")
+				return otgerror.New(otgerror.CodeInput, "--remote-path must be absolute")
 			}
 			if d.Local {
 				d.LocalPath = remotePath
@@ -205,7 +213,7 @@ func (a *app) pullCommand() *cobra.Command {
 			}
 		}
 		if d.LocalPath != "" && filepath.Clean(d.LocalPath) == output {
-			return errors.New("source and destination are the same project directory")
+			return otgerror.New(otgerror.CodeInput, "source and destination are the same project directory")
 		}
 		a.phase(c, "Checking peer protocol")
 		if _, err = negotiatePeer(c.Context(), d); err != nil {
@@ -257,7 +265,7 @@ func (a *app) pullCommand() *cobra.Command {
 	c.Flags().StringVarP(&output, "output", "o", "", "destination project directory")
 	c.Flags().StringVar(&remotePath, "remote-path", "", "source project directory for a first pull")
 	c.Flags().BoolVar(&replace, "replace", false, "replace conflicting managed state after preserving a Git backup")
-	c.Flags().StringVar(&policy, "sessions", "keep-both", "divergent session policy: skip, theirs, or keep-both")
+	addSessionPolicyFlags(c, &policy)
 	addSelectionFlags(c, &selection)
 	return c
 }
@@ -267,5 +275,74 @@ func validateSessionPolicy(policy string) error {
 	case "", "skip", "theirs", "keep-both":
 		return nil
 	}
-	return errors.New("--sessions must be skip, theirs, or keep-both")
+	return otgerror.New(otgerror.CodeInput, "--session-conflict must be skip, theirs, or keep-both")
+}
+
+func addSessionPolicyFlags(c *cobra.Command, policy *string) {
+	c.Flags().StringVar(policy, "session-conflict", "keep-both", "divergent session policy: skip, theirs, or keep-both")
+	c.Flags().StringVar(policy, "sessions", "keep-both", "deprecated alias for --session-conflict")
+	_ = c.Flags().MarkDeprecated("sessions", "use --session-conflict instead; use --no-sessions to exclude histories")
+	_ = c.Flags().MarkHidden("sessions")
+}
+
+func validateTransferOptions(selection agentsessions.Selection, policy string, include, secrets []string) error {
+	if err := agentsessions.ValidateSelection(selection); err != nil {
+		return err
+	}
+	if err := validateSessionPolicy(policy); err != nil {
+		return err
+	}
+	for _, group := range []struct {
+		name  string
+		paths []string
+		glob  bool
+	}{{"--include", include, true}, {"--include-secret", secrets, false}} {
+		for _, raw := range group.paths {
+			normalized := filepath.ToSlash(filepath.Clean(raw))
+			if raw == "" {
+				normalized = ""
+			}
+			if _, err := packageotg.ProjectPath(normalized); err != nil {
+				return otgerror.Wrap(otgerror.CodeInput, fmt.Sprintf("invalid %s path %q", group.name, raw), err)
+			}
+			if group.glob {
+				if _, err := filepath.Match(normalized, ""); err != nil {
+					return otgerror.Wrap(otgerror.CodeInput, fmt.Sprintf("invalid %s pattern %q", group.name, raw), err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (a *app) printDryRun(c *cobra.Command, root string, cfg config.Config, selection agentsessions.Selection, include, secrets []string, destination string) error {
+	files, err := syncer.Preview(c.Context(), root, include, secrets)
+	if err != nil {
+		return err
+	}
+	roots, err := syncer.SessionRoots(cfg)
+	if err != nil {
+		return err
+	}
+	sessions, err := agentsessions.DiscoverWithOptions(root, roots, selection)
+	if err != nil {
+		return err
+	}
+	warnings, err := syncer.PreviewWarnings(root)
+	if err != nil {
+		return err
+	}
+	warnings = append(warnings, sessions.Warnings...)
+	value := map[string]any{"dry_run": true, "selected_files": files, "sessions": sessions.Sessions, "warnings": warnings, "not_checked": []string{"peer", "destination_conflict"}}
+	heading := ""
+	if destination != "" {
+		value["device"] = destination
+		heading = "Destination: " + terminalValue(destination)
+	}
+	message := renderPreview(files, heading) + renderSessionPreview(sessions.Sessions)
+	for _, warning := range warnings {
+		message += "\nWarning: " + terminalValue(warning)
+	}
+	message += "\nNot checked: peer connection and destination conflicts."
+	return a.print(c, value, message)
 }

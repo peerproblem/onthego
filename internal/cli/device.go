@@ -110,7 +110,7 @@ func (a *app) deviceCommand() *cobra.Command {
 		var b strings.Builder
 		for _, n := range names {
 			d := u.Devices[n]
-			fmt.Fprintf(&b, "%s\t%s\t%s\n", n, d.Host, d.Binary)
+			fmt.Fprintf(&b, "%s\t%s\t%s\n", terminalValue(n), terminalValue(d.Host), terminalValue(d.Binary))
 		}
 		if len(names) == 0 {
 			b.WriteString("No devices configured. Use onthego device add.")
@@ -159,7 +159,7 @@ func (a *app) remoteCommand() *cobra.Command {
 		if err = config.SetProjectPeer(cfg.ProjectID, args[0], args[1]); err != nil {
 			return err
 		}
-		return a.print(c, map[string]string{"device": args[0], "path": args[1]}, "Mapped "+args[0]+" → "+args[1])
+		return a.print(c, map[string]string{"device": args[0], "path": args[1]}, "Mapped "+terminalValue(args[0])+" → "+terminalValue(args[1]))
 	}})
 	return c
 }

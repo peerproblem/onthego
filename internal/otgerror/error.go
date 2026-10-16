@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -17,6 +20,8 @@ const (
 	CodeSessionFormat      = "E_SESSION_FORMAT"
 	CodeRestoreFailed      = "E_RESTORE_FAILED"
 	CodeInput              = "E_INPUT"
+	CodeInternal           = "E_INTERNAL"
+	CodeCanceled           = "E_CANCELED"
 	CodePrecondition       = "E_PRECONDITION"
 )
 
@@ -53,15 +58,28 @@ func Wrap(code, message string, cause error) *Error {
 // Public returns the structured error contract without exposing an underlying
 // subprocess error, credential-bearing URL, or native session contents.
 func Public(err error) *Error {
+	if errors.Is(err, context.Canceled) {
+		return New(CodeCanceled, "handoff canceled")
+	}
 	var typed *Error
 	if errors.As(err, &typed) {
 		return &Error{Code: typed.Code, Message: typed.Message, Retryable: typed.Retryable, Stage: typed.Stage, Preserved: typed.Preserved}
 	}
-	if errors.Is(err, context.Canceled) {
-		return New(CodePrecondition, "handoff canceled")
-	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return New(CodeTargetUnavailable, "handoff timed out")
 	}
-	return New(CodeInput, "command failed; check the command arguments and local configuration")
+	return New(CodeInternal, "unexpected error; rerun without --json for details")
+}
+
+// TerminalText escapes untrusted control characters without changing JSON data.
+func TerminalText(value string) string {
+	if !utf8.ValidString(value) {
+		return strconv.Quote(value)
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
+			return strconv.Quote(value)
+		}
+	}
+	return value
 }

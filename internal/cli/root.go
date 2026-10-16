@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 
@@ -11,6 +10,7 @@ import (
 	"github.com/peerproblem/onthego/internal/gitx"
 	"github.com/peerproblem/onthego/internal/identity"
 	"github.com/peerproblem/onthego/internal/otgerror"
+	"github.com/peerproblem/onthego/internal/restore"
 	"github.com/spf13/cobra"
 )
 
@@ -39,11 +39,15 @@ func ExecuteContext(ctx context.Context, version, commit, builtAt string) error 
 	return root.ExecuteContext(ctx)
 }
 func ExitCode(err error) int {
-	var e *otgerror.Error
-	if !errors.As(err, &e) {
-		return 1
+	if err == nil {
+		return 0
 	}
+	e := otgerror.Public(err)
 	switch e.Code {
+	case otgerror.CodeCanceled:
+		return 130
+	case otgerror.CodeInternal:
+		return 1
 	case otgerror.CodeInput:
 		return 2
 	case otgerror.CodePrecondition, otgerror.CodeUnsupportedGit, otgerror.CodeSecretPolicy, otgerror.CodeSessionFormat:
@@ -60,12 +64,16 @@ func ExitCode(err error) int {
 func (a *app) rootCommand() *cobra.Command {
 	c := &cobra.Command{Use: "onthego", Short: "Hand off workspaces and agent sessions between your own machines", SilenceUsage: true, SilenceErrors: true}
 	c.CompletionOptions.DisableDefaultCmd = true
+	c.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return otgerror.Wrap(otgerror.CodeInput, "invalid command arguments", err)
+	})
 	c.PersistentFlags().BoolVar(&a.verbose, "verbose", false, "show handoff phase progress on stderr")
 	c.PersistentFlags().BoolVar(&a.json, "json", false, "write JSON output")
-	c.AddCommand(a.initCommand(), a.deviceCommand(), a.remoteCommand(), a.backupsCommand(), a.undoCommand(), a.pushCommand(), a.pullCommand(), a.statusCommand(), a.inspectCommand(), a.doctorCommand(), a.snapshotCommand(), a.identityCommand(), a.configCommand(), a.peerCommand())
+	c.AddCommand(a.initCommand(), a.deviceCommand(), a.remoteCommand(), a.backupsCommand(), a.undoCommand(), a.pushCommand(), a.pullCommand(), a.statusCommand(), a.inspectCommand(), a.doctorCommand(), a.snapshotCommand(), a.identityCommand(), a.configCommand(), a.peerCommand(), a.sessionsCommand())
 	c.AddCommand(&cobra.Command{Use: "version", Args: cobra.NoArgs, Short: "Show build information", RunE: func(c *cobra.Command, _ []string) error {
 		return a.print(c, map[string]any{"version": a.version, "commit": a.commit, "built_at": a.builtAt}, fmt.Sprintf("onthego %s (%s)", a.version, a.commit))
 	}})
+	typeArgumentErrors(c)
 	return c
 }
 func (a *app) print(c *cobra.Command, v any, message string) error {
@@ -82,7 +90,10 @@ func loadProject() (string, config.Config, error) {
 	}
 	cfg, err := config.Load(root)
 	if os.IsNotExist(err) {
-		return "", cfg, errors.New("run onthego init in this project first")
+		if backups, backupErr := restore.Backups(context.Background(), root); backupErr == nil && len(backups) > 0 {
+			return "", cfg, otgerror.New(otgerror.CodeInput, "project policy is missing; use onthego undo or git checkout -- .onthego.yaml to recover it first; onthego init creates a new project ID")
+		}
+		return "", cfg, otgerror.New(otgerror.CodeInput, "run onthego init in this project first")
 	}
 	return root, cfg, err
 }
@@ -121,7 +132,7 @@ func (a *app) initCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		return a.print(c, map[string]any{"schema_version": 2, "project_id": cfg.ProjectID, "root": root, "config": path}, "Initialized project "+cfg.ProjectID+"\nMachine settings: "+path+"\nAdd a device with onthego device add.")
+		return a.print(c, map[string]any{"schema_version": 2, "project_id": cfg.ProjectID, "root": root, "config": path}, "Initialized project "+terminalValue(cfg.ProjectID)+"\nMachine settings: "+terminalValue(path)+"\nAdd a device with onthego device add.")
 	}}
 }
 func localIdentity() (publicIdentity, error) {
@@ -144,7 +155,41 @@ func (a *app) configCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		return a.print(c, map[string]string{"path": p}, p)
+		return a.print(c, map[string]string{"path": p}, terminalValue(p))
 	}})
 	return c
+}
+
+func loadGitProject(ctx context.Context) (string, error) {
+	root, err := config.FindRoot(".")
+	if err != nil {
+		return "", err
+	}
+	if err = gitx.Validate(ctx, root); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+func typeArgumentErrors(c *cobra.Command) {
+	// Cobra normally flushes deprecated flag warnings through command stdout.
+	// Route pflag diagnostics directly to stderr so JSON output stays parseable.
+	c.Flags().SetOutput(commandErrorWriter{c})
+	if validate := c.Args; validate != nil {
+		c.Args = func(c *cobra.Command, args []string) error {
+			if err := validate(c, args); err != nil {
+				return otgerror.Wrap(otgerror.CodeInput, "invalid command arguments", err)
+			}
+			return nil
+		}
+	}
+	for _, child := range c.Commands() {
+		typeArgumentErrors(child)
+	}
+}
+
+type commandErrorWriter struct{ command *cobra.Command }
+
+func (w commandErrorWriter) Write(data []byte) (int, error) {
+	return w.command.ErrOrStderr().Write(data)
 }

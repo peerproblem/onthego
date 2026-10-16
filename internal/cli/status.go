@@ -54,10 +54,13 @@ func (a *app) statusCommand() *cobra.Command {
 			state = "local changes since last transfer"
 		}
 
-		for _, warning := range status.Warnings {
-			state += "\nWarning: " + warning
+		if status.SessionRecoveryPending {
+			state += "\nNative session recovery pending; run onthego sessions recover."
 		}
-		return a.print(c, status, status.Root+"\n"+state)
+		for _, warning := range status.Warnings {
+			state += "\nWarning: " + terminalValue(warning)
+		}
+		return a.print(c, status, terminalValue(status.Root)+"\n"+state)
 	}}
 }
 func (a *app) doctorCommand() *cobra.Command {
@@ -140,10 +143,10 @@ func (a *app) doctorCommand() *cobra.Command {
 		}
 		message := "Ready. Git and local identity are available."
 		for _, agent := range []string{"codex", "claude"} {
-			message += "\n" + agent + ": " + checks[agent]
+			message += "\n" + agent + ": " + terminalValue(checks[agent])
 		}
 		for _, warning := range warnings {
-			message += "\nWarning: " + warning
+			message += "\nWarning: " + terminalValue(warning)
 		}
 		return a.print(c, map[string]any{"checks": checks, "warnings": warnings}, message)
 	}}

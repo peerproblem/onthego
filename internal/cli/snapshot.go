@@ -1,11 +1,12 @@
 package cli
 
 import (
-	"errors"
 	"path/filepath"
+	"strings"
 
 	"github.com/peerproblem/onthego/internal/agentsessions"
 	"github.com/peerproblem/onthego/internal/identity"
+	"github.com/peerproblem/onthego/internal/otgerror"
 	"github.com/peerproblem/onthego/internal/syncer"
 	"github.com/spf13/cobra"
 )
@@ -17,19 +18,18 @@ func (a *app) snapshotCommand() *cobra.Command {
 	var dry bool
 	var selection agentsessions.Selection
 	pack := &cobra.Command{Use: "pack", Args: cobra.NoArgs, Short: "Capture Git state and native agent histories into an encrypted file", RunE: func(c *cobra.Command, _ []string) error {
-		root, _, err := loadProject()
+		if err := validateTransferOptions(selection, "", include, secrets); err != nil {
+			return err
+		}
+		root, cfg, err := loadProject()
 		if err != nil {
 			return err
 		}
 		if dry {
-			files, err := syncer.Preview(c.Context(), root, include, secrets)
-			if err != nil {
-				return err
-			}
-			return a.print(c, map[string]any{"dry_run": true, "selected_files": files}, renderPreview(files, ""))
+			return a.printDryRun(c, root, cfg, selection, include, secrets, "")
 		}
 		if output == "" {
-			return errors.New("--output is required; choose a new .otg path outside the project")
+			return otgerror.New(otgerror.CodeInput, "--output is required; choose a new .otg path outside the project")
 		}
 		output, err = filepath.Abs(output)
 		if err != nil {
@@ -47,7 +47,12 @@ func (a *app) snapshotCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		return a.print(c, map[string]any{"schema_version": 2, "snapshot_id": m.SnapshotID, "output": output}, "Created encrypted snapshot at "+output+"\nFor another machine, pack with its onthego identity encryption recipient.")
+		var message strings.Builder
+		message.WriteString("Created encrypted snapshot at " + terminalValue(output) + "\nFor another machine, pack with its onthego identity encryption recipient.")
+		for _, warning := range m.Warnings {
+			message.WriteString("\nWarning: " + terminalValue(warning))
+		}
+		return a.print(c, map[string]any{"schema_version": m.SchemaVersion, "snapshot_id": m.SnapshotID, "output": output, "warnings": m.Warnings}, message.String())
 	}}
 	addSelectionFlags(pack, &selection)
 	pack.Flags().StringVarP(&output, "output", "o", "", "new encrypted .otg package path")
@@ -63,7 +68,7 @@ func (a *app) snapshotCommand() *cobra.Command {
 			return err
 		}
 		if destination == "" {
-			return errors.New("--output is required")
+			return otgerror.New(otgerror.CodeInput, "--output is required")
 		}
 		if signer == "" {
 			k, err := identity.LoadOrCreate()
@@ -83,7 +88,7 @@ func (a *app) snapshotCommand() *cobra.Command {
 		}
 		return a.print(c, result, renderTransfer("Restored", result))
 	}}
-	restore.Flags().StringVar(&policy, "sessions", "keep-both", "divergent session policy: skip, theirs, or keep-both")
+	addSessionPolicyFlags(restore, &policy)
 	restore.Flags().StringVarP(&destination, "output", "o", "", "destination project directory")
 	restore.Flags().StringVar(&signer, "signing-public", "", "trusted sender public signing key; defaults to this machine")
 	restore.Flags().BoolVar(&replace, "replace", false, "replace a conflicting destination while preserving a backup")
