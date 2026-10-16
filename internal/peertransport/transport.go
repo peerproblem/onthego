@@ -6,6 +6,7 @@ package peertransport
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/peerproblem/onthego/internal/config"
+	"github.com/peerproblem/onthego/internal/otgerror"
 )
 
 const DefaultBinary = "onthego"
@@ -44,7 +48,7 @@ func (e Endpoint) Validate() error {
 		return errors.New("peer SSH port must be between 1 and 65535 (or 0 for the SSH default)")
 	}
 	if !e.IsLocal() {
-		if !validHost(e.Host) {
+		if config.ValidateHost(e.Host) != nil {
 			return errors.New("peer SSH host must be a hostname, SSH alias, or user@host without whitespace or shell characters")
 		}
 		if len(e.Env) != 0 {
@@ -130,6 +134,10 @@ func (t *Transport) Run(ctx context.Context, args []string, stdin io.Reader, std
 		if ctx.Err() != nil {
 			return fmt.Errorf("peer command canceled: %w", ctx.Err())
 		}
+		var remote otgerror.Error
+		if json.Unmarshal([]byte(diagnostics.String()), &remote) == nil && remote.Code != "" && remote.Message != "" {
+			return &remote
+		}
 		return &CommandError{Cause: err, Diagnostics: strings.TrimSpace(diagnostics.String())}
 	}
 	return nil
@@ -188,18 +196,6 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
-func validHost(value string) bool {
-	if value == "" || strings.HasPrefix(value, "-") || strings.Count(value, "@") > 1 {
-		return false
-	}
-	for _, c := range value {
-		if !asciiAlphaNumeric(c) && !strings.ContainsRune("_.-@%:[]", c) {
-			return false
-		}
-	}
-	return true
-}
-
 func validBinaryName(value string) bool {
 	if value == "" || strings.HasPrefix(value, "-") || value == "." || value == ".." {
 		return false
@@ -239,4 +235,23 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 		_, _ = b.Buffer.Write(p)
 	}
 	return n, nil
+}
+
+// DiscoverBinary asks the remote login shell for its installation path, so
+// ~/.local/bin installations work even when ssh has a minimal nonlogin PATH.
+func DiscoverBinary(ctx context.Context, endpoint Endpoint) (string, error) {
+	if endpoint.IsLocal() {
+		return exec.LookPath(DefaultBinary)
+	}
+	endpoint.Binary = "/bin/sh"
+	endpoint.Path = ""
+	var out bytes.Buffer
+	if err := endpoint.Run(ctx, []string{"-c", `exec "${SHELL:-/bin/sh}" -lc 'command -v onthego'`}, nil, &out); err != nil {
+		return "", fmt.Errorf("find onthego in remote login shell (or use --binary): %w", err)
+	}
+	found := strings.TrimSpace(out.String())
+	if !filepath.IsAbs(found) || invalidPath(found) {
+		return "", errors.New("remote login shell did not return an absolute onthego path; use --binary")
+	}
+	return found, nil
 }

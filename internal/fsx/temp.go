@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jbaehova/onthego/internal/otgerror"
+	"github.com/peerproblem/onthego/internal/otgerror"
 )
 
 type tempLease struct {

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jbaehova/onthego/internal/otgerror"
+	"github.com/peerproblem/onthego/internal/otgerror"
 )
 
 // SafeOriginURL retains portable remotes while removing embedded credentials.
@@ -44,9 +44,15 @@ type Result struct {
 }
 
 func Run(ctx context.Context, root string, args ...string) (Result, error) {
+	return run(ctx, root, nil, nil, args...)
+}
+
+func run(ctx context.Context, root string, env []string, input []byte, args ...string) (Result, error) {
 	command := exec.CommandContext(ctx, "git", args...)
 	command.Dir = root
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
+	command.Env = append(command.Env, env...)
+	command.Stdin = bytes.NewReader(input)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -89,7 +95,7 @@ func Validate(ctx context.Context, root string) error {
 	}
 	for _, entry := range bytes.Split(flags.Stdout, []byte{0}) {
 		if len(entry) > 0 && (entry[0] == 'S' || (entry[0] >= 'a' && entry[0] <= 'z')) {
-			return otgerror.New(otgerror.CodeUnsupportedGit, "clear assume-unchanged and skip-worktree index flags before synchronizing")
+			return otgerror.New(otgerror.CodeUnsupportedGit, "clear assume-unchanged and skip-worktree index flags before handoff")
 		}
 	}
 	visible, err := Run(short, root, "diff", "--cached", "--raw", "-z", "--ita-visible-in-index")
@@ -101,18 +107,18 @@ func Validate(ctx context.Context, root string) error {
 		return err
 	}
 	if !bytes.Equal(visible.Stdout, invisible.Stdout) {
-		return otgerror.New(otgerror.CodeUnsupportedGit, "stage or reset intent-to-add index entries before synchronizing")
+		return otgerror.New(otgerror.CodeUnsupportedGit, "stage or reset intent-to-add index entries before handoff")
 	}
 	if _, err := os.Stat(root + "/.gitmodules"); err == nil {
-		return otgerror.New(otgerror.CodeUnsupportedGit, "submodule synchronization is not supported")
+		return otgerror.New(otgerror.CodeUnsupportedGit, "submodule handoff is not supported")
 	}
 	sparse, err := Run(short, root, "config", "--bool", "core.sparseCheckout")
 	if err == nil && strings.TrimSpace(string(sparse.Stdout)) == "true" {
-		return otgerror.New(otgerror.CodeUnsupportedGit, "sparse checkout synchronization is not supported")
+		return otgerror.New(otgerror.CodeUnsupportedGit, "sparse checkout handoff is not supported")
 	}
 	partial, err := Run(short, root, "config", "--local", "--get-regexp", `^(extensions\.partialClone|remote\..*\.promisor)$`)
 	if err == nil && len(strings.TrimSpace(string(partial.Stdout))) > 0 {
-		return otgerror.New(otgerror.CodeUnsupportedGit, "partial clone synchronization is not supported")
+		return otgerror.New(otgerror.CodeUnsupportedGit, "partial clone handoff is not supported")
 	}
 	filters, err := Run(short, root, "config", "--local", "--get-regexp", `^filter\.`)
 	if err == nil && len(strings.TrimSpace(string(filters.Stdout))) > 0 {
@@ -120,25 +126,7 @@ func Validate(ctx context.Context, root string) error {
 	}
 	lfs, err := Run(short, root, "grep", "-I", "-n", "filter=lfs", "--", "*.gitattributes")
 	if err == nil && len(strings.TrimSpace(string(lfs.Stdout))) > 0 {
-		return otgerror.New(otgerror.CodeUnsupportedGit, "Git LFS synchronization is not supported")
+		return otgerror.New(otgerror.CodeUnsupportedGit, "Git LFS handoff is not supported")
 	}
 	return nil
-}
-
-func Status(ctx context.Context, root string) ([]byte, error) {
-	result, err := Run(ctx, root, "-c", "core.quotepath=false", "status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all")
-	return result.Stdout, err
-}
-
-func Dirty(ctx context.Context, root string) (bool, error) {
-	status, err := Status(ctx, root)
-	if err != nil {
-		return false, err
-	}
-	for _, item := range bytes.Split(status, []byte{0}) {
-		if len(item) > 0 && item[0] != '#' {
-			return true, nil
-		}
-	}
-	return false, nil
 }

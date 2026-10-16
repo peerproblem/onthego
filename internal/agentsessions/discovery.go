@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jbaehova/onthego/internal/fsx"
+	"github.com/peerproblem/onthego/internal/fsx"
 )
 
 const DefaultRecentDays = 7

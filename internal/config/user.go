@@ -22,6 +22,8 @@ const UserFileName = "config.yaml"
 // Device is a peer owned by the user. SSH uses the user's existing SSH agent
 // and configuration; onthego does not need or store a service API key.
 type Device struct {
+	Local         bool   `yaml:"local,omitempty" json:"local,omitempty"`
+	Home          string `yaml:"home,omitempty" json:"home,omitempty"`
 	Host          string `yaml:"host,omitempty" json:"host,omitempty"`
 	Path          string `yaml:"path,omitempty" json:"path,omitempty"`
 	LocalPath     string `yaml:"local_path,omitempty" json:"local_path,omitempty"`
@@ -33,8 +35,9 @@ type Device struct {
 }
 
 type UserConfig struct {
-	SchemaVersion int               `yaml:"schema_version" json:"schema_version"`
-	Devices       map[string]Device `yaml:"devices" json:"devices"`
+	SchemaVersion int                        `yaml:"schema_version" json:"schema_version"`
+	Devices       map[string]Device          `yaml:"devices" json:"devices"`
+	Trusted       map[string]TrustedIdentity `yaml:"trusted,omitempty" json:"trusted,omitempty"`
 }
 
 func UserConfigPath() (string, error) {
@@ -136,9 +139,25 @@ func SaveUser(cfg UserConfig) error {
 	return os.Rename(tmp.Name(), file)
 }
 
+type TrustedIdentity struct {
+	AgeRecipient  string `yaml:"age_recipient" json:"age_recipient"`
+	SigningPublic string `yaml:"signing_public" json:"signing_public"`
+}
+
 func validateUser(cfg UserConfig) error {
 	if cfg.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("unsupported user config schema %d (expected %d)", cfg.SchemaVersion, SchemaVersion)
+	}
+	for name, trusted := range cfg.Trusted {
+		if err := ValidateDeviceName(name); err != nil {
+			return err
+		}
+		if err := ValidateDevice(Device{Local: true, AgeRecipient: trusted.AgeRecipient, SigningPublic: trusted.SigningPublic}); err != nil {
+			return err
+		}
+		if trusted.AgeRecipient == "" || trusted.SigningPublic == "" {
+			return errors.New("trusted identity requires both public keys")
+		}
 	}
 	for name, device := range cfg.Devices {
 		if err := ValidateDeviceName(name); err != nil {
@@ -164,22 +183,24 @@ func ValidateDeviceName(name string) error {
 }
 
 func ValidateDevice(device Device) error {
-	if (device.Host == "") == (device.LocalPath == "") {
+	if device.Home != "" && (!filepath.IsAbs(device.Home) || hasControl(device.Home)) {
+		return errors.New("device home must be an absolute path without control characters")
+	}
+	if (device.Host == "") == (!device.Local && device.LocalPath == "") {
 		return errors.New("set exactly one of host or local_path")
 	}
-	if device.LocalPath != "" {
-		if !filepath.IsAbs(device.LocalPath) || hasControl(device.LocalPath) {
+	if device.Local || device.LocalPath != "" {
+		if device.LocalPath != "" && (!filepath.IsAbs(device.LocalPath) || hasControl(device.LocalPath)) {
 			return errors.New("local_path must be an absolute path without control characters")
 		}
 		if device.Path != "" || device.Port != 0 || device.IdentityFile != "" {
 			return errors.New("local devices cannot have SSH path, port or identity_file settings")
 		}
 	} else {
-		parts := strings.Split(device.Host, "@")
-		if len(parts) > 2 || len(parts) == 2 && !sshUserPattern.MatchString(parts[0]) || !sshHostPattern.MatchString(parts[len(parts)-1]) {
-			return errors.New("host must be an SSH alias, hostname, or user@host without shell characters or options")
+		if err := ValidateHost(device.Host); err != nil {
+			return err
 		}
-		if !path.IsAbs(device.Path) || hasControl(device.Path) {
+		if device.Path != "" && (!path.IsAbs(device.Path) || hasControl(device.Path)) {
 			return errors.New("path must be an absolute remote project path without control characters")
 		}
 		if device.Port < 0 || device.Port > 65535 {
@@ -204,6 +225,14 @@ func ValidateDevice(device Device) error {
 		if err != nil || len(key) != ed25519.PublicKeySize {
 			return errors.New("invalid signing public key")
 		}
+	}
+	return nil
+}
+
+func ValidateHost(host string) error {
+	parts := strings.Split(host, "@")
+	if len(parts) > 2 || len(parts) == 2 && !sshUserPattern.MatchString(parts[0]) || !sshHostPattern.MatchString(parts[len(parts)-1]) {
+		return errors.New("host must be an SSH alias, hostname, or user@host without shell characters or options")
 	}
 	return nil
 }

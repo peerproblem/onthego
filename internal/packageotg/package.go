@@ -3,6 +3,7 @@ package packageotg
 import (
 	"archive/tar"
 	"bufio"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -19,19 +20,30 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jbaehova/onthego/internal/identity"
-	"github.com/jbaehova/onthego/internal/otgerror"
-	"github.com/jbaehova/onthego/internal/snapshot"
 	"github.com/klauspost/compress/zstd"
+	"github.com/peerproblem/onthego/internal/gitx"
+	"github.com/peerproblem/onthego/internal/identity"
+	"github.com/peerproblem/onthego/internal/otgerror"
+	"github.com/peerproblem/onthego/internal/snapshot"
 )
 
 const (
 	MaxFiles       = 20000
 	MaxPayloadSize = int64(250 << 20)
 	MaxRatio       = int64(200)
+	MaxBundleSize  = int64(64 << 30) // Independent transport safety limit, not workspace payload.
 )
 
 func Create(payloadDir, output string, manifest snapshot.Manifest, recipient age.Recipient, signer ed25519.PrivateKey) error {
+	return CreateContext(context.Background(), payloadDir, output, manifest, recipient, signer)
+}
+
+// CreateContext checks cancellation while reading, compressing and encrypting
+// payload bytes. A canceled package is never published to output.
+func CreateContext(ctx context.Context, payloadDir, output string, manifest snapshot.Manifest, recipient age.Recipient, signer ed25519.PrivateKey) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(signer) != ed25519.PrivateKeySize {
 		return errors.New("invalid Ed25519 signing key")
 	}
@@ -48,7 +60,7 @@ func Create(payloadDir, output string, manifest snapshot.Manifest, recipient age
 	if err != nil {
 		return err
 	}
-	if err := checkPayloadLimits(payloadDir, int64(len(manifestJSON))+int64(base64.StdEncoding.EncodedLen(ed25519.SignatureSize))); err != nil {
+	if err := checkPayloadLimitsContext(ctx, payloadDir, int64(len(manifestJSON))+int64(base64.StdEncoding.EncodedLen(ed25519.SignatureSize))); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(output), ".onthego-package-*.tmp")
@@ -62,7 +74,7 @@ func Create(payloadDir, output string, manifest snapshot.Manifest, recipient age
 		tmp.Close()
 		return err
 	}
-	ageWriter, err := age.Encrypt(tmp, recipient)
+	ageWriter, err := age.Encrypt(contextWriter{ctx, tmp}, recipient)
 	if err != nil {
 		tmp.Close()
 		return err
@@ -71,14 +83,15 @@ func Create(payloadDir, output string, manifest snapshot.Manifest, recipient age
 	if err != nil {
 		return err
 	}
-	tarWriter := tar.NewWriter(zstdWriter)
+	defer zstdWriter.Close()
+	tarWriter := tar.NewWriter(contextWriter{ctx, zstdWriter})
 	if err := writeBytes(tarWriter, "manifest.json", manifestJSON, 0o600); err != nil {
 		return err
 	}
 	if err := writeBytes(tarWriter, "manifest.sig", []byte(base64.StdEncoding.EncodeToString(signature)), 0o600); err != nil {
 		return err
 	}
-	if err := writeTree(tarWriter, payloadDir); err != nil {
+	if err := writeTreeContext(ctx, tarWriter, payloadDir); err != nil {
 		return err
 	}
 	if err := tarWriter.Close(); err != nil {
@@ -96,11 +109,24 @@ func Create(payloadDir, output string, manifest snapshot.Manifest, recipient age
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// Linking publishes the complete package without replacing an existing one.
 	return os.Link(name, output)
 }
 
 func Extract(packagePath, outputDir string, ageIdentity age.Identity, expectedSigner string) (snapshot.Manifest, error) {
+	return ExtractContext(context.Background(), packagePath, outputDir, ageIdentity, expectedSigner)
+}
+
+// ExtractContext checks cancellation through encrypted, compressed and decoded
+// reads, including signature-bound payload hashing. The caller owns outputDir
+// and must remove its temporary extraction directory on any failure.
+func ExtractContext(ctx context.Context, packagePath, outputDir string, ageIdentity age.Identity, expectedSigner string) (snapshot.Manifest, error) {
+	if err := ctx.Err(); err != nil {
+		return snapshot.Manifest{}, err
+	}
 	packageInfo, err := os.Stat(packagePath)
 	if err != nil {
 		return snapshot.Manifest{}, err
@@ -110,11 +136,11 @@ func Extract(packagePath, outputDir string, ageIdentity age.Identity, expectedSi
 		return snapshot.Manifest{}, err
 	}
 	defer input.Close()
-	decrypted, err := age.Decrypt(bufio.NewReader(input), ageIdentity)
+	decrypted, err := age.Decrypt(bufio.NewReader(contextReader{ctx, input}), ageIdentity)
 	if err != nil {
 		return snapshot.Manifest{}, packageError("age decryption failed", err)
 	}
-	zstdReader, err := zstd.NewReader(decrypted, zstd.WithDecoderMaxMemory(uint64(MaxPayloadSize*2)))
+	zstdReader, err := zstd.NewReader(contextReader{ctx, decrypted}, zstd.WithDecoderMaxMemory(uint64(MaxPayloadSize*2)), zstd.WithDecoderConcurrency(1))
 	if err != nil {
 		return snapshot.Manifest{}, packageError("zstd stream is invalid", err)
 	}
@@ -127,11 +153,14 @@ func Extract(packagePath, outputDir string, ageIdentity age.Identity, expectedSi
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return snapshot.Manifest{}, err
 	}
-	tarReader := tar.NewReader(zstdReader)
+	tarReader := tar.NewReader(contextReader{ctx, zstdReader})
 	seen := map[string]bool{}
 	var total int64
 	var count int
 	for {
+		if err := ctx.Err(); err != nil {
+			return snapshot.Manifest{}, err
+		}
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
 			break
@@ -151,7 +180,13 @@ func Extract(packagePath, outputDir string, ageIdentity age.Identity, expectedSi
 		if err := CheckParents(outputDir, name); err != nil {
 			return snapshot.Manifest{}, packageError("archive path traverses a symlink", err)
 		}
-		total += header.Size
+		if name == "repo.bundle" {
+			if header.Size < 0 || header.Size > MaxBundleSize {
+				return snapshot.Manifest{}, packageError("Git bundle exceeds transport safety limit", nil)
+			}
+		} else {
+			total += header.Size
+		}
 		if total > MaxPayloadSize || (packageInfo.Size() > 0 && total > packageInfo.Size()*MaxRatio) {
 			return snapshot.Manifest{}, packageError("archive extraction limit exceeded", nil)
 		}
@@ -176,7 +211,7 @@ func Extract(packagePath, outputDir string, ageIdentity age.Identity, expectedSi
 			if err != nil {
 				return snapshot.Manifest{}, err
 			}
-			_, copyErr := io.CopyN(file, tarReader, header.Size)
+			_, copyErr := io.CopyN(contextWriter{ctx, file}, contextReader{ctx, tarReader}, header.Size)
 			closeErr := file.Close()
 			if copyErr != nil {
 				return snapshot.Manifest{}, packageError("archive entry is truncated", copyErr)
@@ -202,10 +237,17 @@ func Extract(packagePath, outputDir string, ageIdentity age.Identity, expectedSi
 			return snapshot.Manifest{}, packageError("archive contains unsupported entry type", nil)
 		}
 	}
-	return verifyExtracted(outputDir, expectedSigner)
+	return verifyExtractedContext(ctx, outputDir, expectedSigner)
 }
 
 func verifyExtracted(root, expectedSigner string) (snapshot.Manifest, error) {
+	return verifyExtractedContext(context.Background(), root, expectedSigner)
+}
+
+func verifyExtractedContext(ctx context.Context, root, expectedSigner string) (snapshot.Manifest, error) {
+	if err := ctx.Err(); err != nil {
+		return snapshot.Manifest{}, err
+	}
 	manifestData, err := os.ReadFile(filepath.Join(root, "manifest.json"))
 	if err != nil {
 		return snapshot.Manifest{}, packageError("manifest missing", err)
@@ -245,35 +287,16 @@ func verifyExtracted(root, expectedSigner string) (snapshot.Manifest, error) {
 		return snapshot.Manifest{}, packageError("manifest signature verification failed", err)
 	}
 	for path, expected := range manifest.PayloadHashes {
-		if err := verifyFileHash(root, path, expected); err != nil {
-			return snapshot.Manifest{}, err
-		}
-	}
-	for _, file := range manifest.Files {
-		if file.Kind == "tombstone" {
-			continue
-		}
-		path := filepath.Join(root, filepath.FromSlash(file.ArchivePath))
-		if file.Kind == "symlink" {
-			target, err := os.Readlink(path)
-			if err != nil || target != file.LinkTarget {
-				return snapshot.Manifest{}, packageError("symlink payload mismatch", err)
-			}
-			continue
-		}
-		if err := verifyFileHash(root, file.ArchivePath, file.SHA256); err != nil {
+		if err := verifyFileHashContext(ctx, root, path, expected); err != nil {
 			return snapshot.Manifest{}, err
 		}
 	}
 	// Every regular payload must be covered by the signed manifest. Otherwise an
 	// attacker could add context or executable files beside authenticated ones.
-	symlinks := map[string]bool{}
-	for _, file := range manifest.Files {
-		if file.Kind == "symlink" {
-			symlinks[file.ArchivePath] = true
-		}
-	}
 	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -286,10 +309,7 @@ func verifyExtracted(root, expectedSigner string) (snapshot.Manifest, error) {
 		}
 		rel = filepath.ToSlash(rel)
 		if entry.Type()&os.ModeSymlink != 0 {
-			if !symlinks[rel] {
-				return fmt.Errorf("unsigned symlink: %s", rel)
-			}
-			return nil
+			return fmt.Errorf("unexpected symlink payload: %s", rel)
 		}
 		if rel != "manifest.json" && rel != "manifest.sig" && manifest.PayloadHashes[rel] == "" {
 			return fmt.Errorf("unsigned payload: %s", rel)
@@ -302,14 +322,16 @@ func verifyExtracted(root, expectedSigner string) (snapshot.Manifest, error) {
 }
 
 func validateManifest(manifest snapshot.Manifest) error {
-	for path, hash := range map[string]string{
-		"repo.bundle":    manifest.Git.BundleSHA256,
-		"index.patch":    manifest.Git.IndexPatchSHA256,
-		"worktree.patch": manifest.Git.WorkPatchSHA256,
-	} {
-		if !validHash(hash) || manifest.PayloadHashes[path] != hash {
-			return fmt.Errorf("missing or inconsistent %s hash", path)
+	if !validHash(manifest.Git.BundleSHA256) || manifest.PayloadHashes["repo.bundle"] != manifest.Git.BundleSHA256 {
+		return fmt.Errorf("missing or inconsistent repo.bundle hash")
+	}
+	for _, id := range []string{manifest.SourceGitHead, manifest.Git.WIPCommit, manifest.Git.IndexTree, manifest.Git.WorktreeTree, manifest.Git.UntrackedTree} {
+		if !gitx.ValidOID(id) {
+			return fmt.Errorf("invalid Git object ID")
 		}
+	}
+	if len(manifest.ParentSnapshotIDs) > 1 {
+		return fmt.Errorf("snapshot must have at most one direct parent")
 	}
 	for path, hash := range manifest.PayloadHashes {
 		if _, err := safeArchivePath(path); err != nil || !validHash(hash) {
@@ -323,17 +345,19 @@ func validateManifest(manifest snapshot.Manifest) error {
 			return fmt.Errorf("unsafe or duplicate selected path: %s", file.RelativePath)
 		}
 		seen[rel] = true
-		if file.Kind == "tombstone" {
-			continue
+		if !validHash(file.SHA256) || file.SizeBytes < 0 {
+			return fmt.Errorf("invalid selected file metadata: %s", rel)
 		}
-		if file.ArchivePath != "files/"+rel || !validHash(file.SHA256) {
-			return fmt.Errorf("invalid selected payload: %s", rel)
+		if file.Secret {
+			if file.ArchivePath != "secret-files/"+rel || manifest.PayloadHashes[file.ArchivePath] != file.SHA256 {
+				return fmt.Errorf("invalid encrypted secret payload: %s", rel)
+			}
+		} else if file.ArchivePath != "" {
+			return fmt.Errorf("nonsecret file must use the Git tree: %s", rel)
 		}
 		switch file.Kind {
 		case "file":
-			if manifest.PayloadHashes[file.ArchivePath] != file.SHA256 {
-				return fmt.Errorf("selected payload hash is inconsistent: %s", rel)
-			}
+
 		case "symlink":
 			if _, err := safeLinkTarget(rel, file.LinkTarget); err != nil {
 				return err
@@ -355,8 +379,15 @@ func validHash(value string) bool {
 }
 
 func checkPayloadLimits(root string, manifestBytes int64) error {
+	return checkPayloadLimitsContext(context.Background(), root, manifestBytes)
+}
+
+func checkPayloadLimitsContext(ctx context.Context, root string, manifestBytes int64) error {
 	total, count := manifestBytes, 2 // manifest.json and manifest.sig
 	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -372,6 +403,12 @@ func checkPayloadLimits(root string, manifestBytes int64) error {
 			if err != nil {
 				return err
 			}
+			if filepath.Base(path) == "repo.bundle" && filepath.Dir(path) == root {
+				if info.Size() > MaxBundleSize {
+					return packageError("Git bundle exceeds transport safety limit", nil)
+				}
+				return nil
+			}
 			total += info.Size()
 			if total > MaxPayloadSize {
 				return packageError("snapshot exceeds the 250 MiB expanded payload limit", nil)
@@ -382,8 +419,15 @@ func checkPayloadLimits(root string, manifestBytes int64) error {
 }
 
 func writeTree(writer *tar.Writer, root string) error {
+	return writeTreeContext(context.Background(), writer, root)
+}
+
+func writeTreeContext(ctx context.Context, writer *tar.Writer, root string) error {
 	var paths []string
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -401,6 +445,9 @@ func writeTree(writer *tar.Writer, root string) error {
 		return filepath.ToSlash(left) < filepath.ToSlash(right)
 	})
 	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
@@ -441,7 +488,7 @@ func writeTree(writer *tar.Writer, root string) error {
 			if err != nil {
 				return err
 			}
-			_, copyErr := io.Copy(writer, file)
+			_, copyErr := io.Copy(writer, contextReader{ctx, file})
 			closeErr := file.Close()
 			if copyErr != nil {
 				return copyErr
@@ -484,6 +531,13 @@ func safeLinkTarget(entry, target string) (string, error) {
 }
 
 func verifyFileHash(root, archivePath, expected string) error {
+	return verifyFileHashContext(context.Background(), root, archivePath, expected)
+}
+
+func verifyFileHashContext(ctx context.Context, root, archivePath, expected string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	path, err := safeArchivePath(archivePath)
 	if err != nil {
 		return packageError("manifest contains unsafe payload path", err)
@@ -501,7 +555,7 @@ func verifyFileHash(root, archivePath, expected string) error {
 	}
 	defer file.Close()
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	if _, err := io.Copy(hash, contextReader{ctx, file}); err != nil {
 		return err
 	}
 	actual := hex.EncodeToString(hash.Sum(nil))
@@ -513,4 +567,36 @@ func verifyFileHash(root, archivePath, expected string) error {
 
 func packageError(message string, err error) error {
 	return &otgerror.Error{Code: otgerror.CodePackageInvalid, Message: message, Cause: err}
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(p)
+	if err == nil {
+		err = r.ctx.Err()
+	}
+	return n, err
+}
+
+type contextWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+func (w contextWriter) Write(p []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := w.writer.Write(p)
+	if err == nil {
+		err = w.ctx.Err()
+	}
+	return n, err
 }

@@ -48,6 +48,10 @@ func FindRoot(start string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	abs, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
 	for {
 		if _, err := os.Stat(filepath.Join(abs, ".git")); err == nil {
 			return abs, nil
@@ -200,9 +204,6 @@ func ValidateRelative(root, raw string) (string, error) {
 
 func DataRoot() (string, error) {
 	if override := os.Getenv("ONTHEGO_HOME"); override != "" {
-		return filepath.Abs(override)
-	}
-	if override := os.Getenv("ONTHEGO_DATA_HOME"); override != "" {
 		return filepath.Abs(override)
 	}
 	root, err := os.UserHomeDir()

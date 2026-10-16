@@ -4,262 +4,802 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"io"
-	"io/fs"
+	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"syscall"
+	"time"
 
 	"filippo.io/age"
-	"github.com/jbaehova/onthego/internal/gitx"
-	"github.com/jbaehova/onthego/internal/otgerror"
-	"github.com/jbaehova/onthego/internal/packageotg"
-	"github.com/jbaehova/onthego/internal/snapshot"
+	"github.com/peerproblem/onthego/internal/config"
+	"github.com/peerproblem/onthego/internal/fsx"
+	"github.com/peerproblem/onthego/internal/gitx"
+	"github.com/peerproblem/onthego/internal/otgerror"
+	"github.com/peerproblem/onthego/internal/packageotg"
+	"github.com/peerproblem/onthego/internal/snapshot"
+	"gopkg.in/yaml.v3"
 )
+
+const DefaultBackupLimit = 5
 
 type Result struct {
 	Manifest snapshot.Manifest `json:"manifest"`
 	Root     string            `json:"root"`
+	Backup   string            `json:"backup,omitempty"`
 }
 
-func Package(ctx context.Context, packagePath, output string, ageIdentity age.Identity, expectedSigner string) (Result, error) {
-	if _, err := os.Lstat(output); err == nil {
+type Backup struct {
+	Ref       string    `json:"ref"`
+	Commit    string    `json:"commit"`
+	CreatedAt time.Time `json:"created_at"`
+	Head      string    `json:"head"`
+	Branch    string    `json:"branch"`
+}
+
+type backupState struct {
+	WIP           gitx.WIP          `json:"wip"`
+	Files         []snapshot.File   `json:"files,omitempty"`
+	AfterPaths    []string          `json:"after_paths"`
+	CreatedAt     time.Time         `json:"created_at"`
+	SecretPaths   []string          `json:"secret_paths,omitempty"`
+	SecretArchive string            `json:"secret_archive,omitempty"`
+	SecretSHA256  string            `json:"secret_sha256,omitempty"`
+	BranchRefs    map[string]string `json:"branch_refs,omitempty"`
+}
+
+// Package restores a standalone package into a new directory. Sessions remain
+// only in the private extraction directory and are removed with it.
+func Package(ctx context.Context, path, output string, secret age.Identity, signer string) (Result, error) {
+	if _, e := os.Lstat(output); e == nil {
 		return Result{}, otgerror.New(otgerror.CodeInput, "restore output already exists")
-	} else if !os.IsNotExist(err) {
-		return Result{}, err
+	} else if !os.IsNotExist(e) {
+		return Result{}, e
 	}
-	parent := filepath.Dir(output)
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		return Result{}, err
+	temp, e := tempDir("restore-")
+	if e != nil {
+		return Result{}, e
 	}
-	staging, err := os.MkdirTemp(parent, ".onthego-restore-*")
-	if err != nil {
-		return Result{}, err
+	defer fsx.ReleaseTemp(temp)
+	extracted := filepath.Join(temp, "payload")
+	m, e := packageotg.ExtractContext(ctx, path, extracted, secret, signer)
+	if e != nil {
+		return Result{}, e
 	}
-	defer os.RemoveAll(staging)
-	extracted := filepath.Join(staging, "payload")
-	manifest, err := packageotg.Extract(packagePath, extracted, ageIdentity, expectedSigner)
-	if err != nil {
-		return Result{}, err
+	// Authenticate and validate objects before publishing a destination directory.
+	if _, e = prepare(ctx, extracted, m, ""); e != nil {
+		return Result{}, e
 	}
-	root := filepath.Join(staging, "repo")
-	command := []string{"-c", "core.autocrlf=false", "clone", "--no-checkout", "--no-hardlinks", filepath.Join(extracted, "repo.bundle"), root}
-	if _, err := gitx.Run(ctx, parent, command...); err != nil {
-		return Result{}, restoreError("clone bundled repository", err)
-	}
-	if _, err := gitx.Run(ctx, root, "remote", "remove", "origin"); err != nil {
-		return Result{}, restoreError("remove temporary bundle remote", err)
-	}
-	// Clone maps local branches to remote-tracking refs. Fetch the complete ref
-	// namespace back into place, including unpushed branches, tags and stashes.
-	if _, err := gitx.Run(ctx, root, "fetch", "--no-tags", "--update-head-ok", filepath.Join(extracted, "repo.bundle"), "+refs/*:refs/*"); err != nil {
-		return Result{}, restoreError("restore bundled Git refs", err)
-	}
-	checkout := []string{"-c", "core.autocrlf=false", "checkout", "--detach", manifest.SourceGitHead}
-	if manifest.SourceBranch != "" && manifest.SourceBranch != "(detached)" {
-		if _, err := gitx.Run(ctx, root, "check-ref-format", "--branch", manifest.SourceBranch); err != nil {
-			return Result{}, restoreError("snapshot branch is invalid", err)
-		}
-		checkout = []string{"-c", "core.autocrlf=false", "checkout", "-B", manifest.SourceBranch, manifest.SourceGitHead}
-	}
-	if _, err := gitx.Run(ctx, root, checkout...); err != nil {
-		return Result{}, restoreError("checkout snapshot HEAD", err)
-	}
-	if manifest.Git.OriginURL != "" {
-		if gitx.SafeOriginURL(manifest.Git.OriginURL) != manifest.Git.OriginURL {
-			return Result{}, restoreError("snapshot origin URL is not portable or contains credentials", nil)
-		}
-		if _, err := gitx.Run(ctx, root, "remote", "add", "origin", manifest.Git.OriginURL); err != nil {
-			return Result{}, restoreError("restore origin remote", err)
-		}
-	}
-	if err := applyPatch(ctx, root, filepath.Join(extracted, "index.patch"), true); err != nil {
-		return Result{}, err
-	}
-	if err := applyPatch(ctx, root, filepath.Join(extracted, "worktree.patch"), false); err != nil {
-		return Result{}, err
-	}
-	for _, file := range manifest.Files {
-		if err := restoreSelected(extracted, root, file); err != nil {
-			return Result{}, err
-		}
-	}
-	contextSource := filepath.Join(extracted, "context")
-	if info, err := os.Stat(contextSource); err == nil && info.IsDir() {
-		if err := packageotg.CheckParents(root, ".onthego.local/context/placeholder"); err != nil {
-			return Result{}, restoreError("context destination traverses a symlink", err)
-		}
-		if err := copyTree(contextSource, filepath.Join(root, ".onthego.local", "context")); err != nil {
-			return Result{}, err
-		}
-	}
-	if err := verify(ctx, root, extracted, manifest); err != nil {
-		return Result{}, err
-	}
-	if err := os.Rename(root, output); err != nil {
-		return Result{}, err
-	}
-	return Result{Manifest: manifest, Root: output}, nil
+	return Apply(ctx, extracted, output, m, nil)
 }
 
-func applyPatch(ctx context.Context, root, path string, index bool) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return restoreError("read patch", err)
+// Config imports incoming objects without touching working files, then returns
+// the authenticated project policy. Missing destinations are never created.
+func Config(ctx context.Context, extracted string, m snapshot.Manifest, existingRoot string) (config.Config, error) {
+	root, cleanup, e := objectRoot(ctx, existingRoot, m.SourceGitHead)
+	if e != nil {
+		return config.Config{}, e
 	}
-	if info.Size() == 0 {
-		return nil
+	defer cleanup()
+	if e = importBundle(ctx, root, extracted, m); e != nil {
+		return config.Config{}, e
 	}
-	args := []string{"-c", "core.autocrlf=false", "apply", "--binary", "--whitespace=nowarn"}
-	if index {
-		args = append(args, "--index")
+	if e = validateState(ctx, root, m); e != nil {
+		return config.Config{}, e
 	}
-	args = append(args, path)
-	if _, err := gitx.Run(ctx, root, args...); err != nil {
-		return restoreError("apply captured Git patch", err)
+	var data []byte
+	for _, tree := range []string{m.Git.UntrackedTree, m.Git.WorktreeTree} {
+		r, err := gitx.Run(ctx, root, "show", tree+":"+config.FileName)
+		if err == nil {
+			data = r.Stdout
+			break
+		}
+	}
+	if len(data) == 0 {
+		return config.Config{}, restoreError("snapshot has no project configuration", nil)
+	}
+	var cfg config.Config
+	if e = yaml.Unmarshal(data, &cfg); e != nil {
+		return cfg, restoreError("snapshot project configuration is invalid", e)
+	}
+	if e = config.ValidateProjectID(cfg.ProjectID); e != nil {
+		return cfg, e
+	}
+	if cfg.ProjectID != m.ProjectID {
+		return cfg, restoreError("snapshot project IDs differ", nil)
+	}
+	if cfg.SchemaVersion != 1 && cfg.SchemaVersion != config.SchemaVersion {
+		return cfg, restoreError("snapshot project schema is unsupported", nil)
+	}
+	cfg.SchemaVersion = config.SchemaVersion
+	return cfg, nil
+}
+
+func prepare(ctx context.Context, extracted string, m snapshot.Manifest, existing string) (string, error) {
+	root, cleanup, e := objectRoot(ctx, existing, m.SourceGitHead)
+	if e != nil {
+		return "", e
+	}
+	defer cleanup()
+	if e = importBundle(ctx, root, extracted, m); e != nil {
+		return "", e
+	}
+	return root, validateState(ctx, root, m)
+}
+
+func objectRoot(ctx context.Context, existing, head string) (string, func(), error) {
+	if existing != "" {
+		if _, e := gitx.Run(ctx, existing, "rev-parse", "--git-dir"); e == nil {
+			return existing, func() {}, nil
+		}
+	}
+	temp, e := tempDir("objects-")
+	if e != nil {
+		return "", nil, e
+	}
+	root := filepath.Join(temp, "repo")
+	if e = os.Mkdir(root, 0700); e != nil {
+		fsx.ReleaseTemp(temp)
+		return "", nil, e
+	}
+	if _, e = gitx.Run(ctx, root, "init", "--quiet", objectFormatArgument(head)); e != nil {
+		fsx.ReleaseTemp(temp)
+		return "", nil, e
+	}
+	return root, func() { _ = fsx.ReleaseTemp(temp) }, nil
+}
+
+func importBundle(ctx context.Context, root, extracted string, m snapshot.Manifest) error {
+	if !gitx.ValidOID(m.Git.WIPCommit) {
+		return restoreError("invalid WIP commit", nil)
+	}
+	bundle := filepath.Join(extracted, "repo.bundle")
+	if _, e := gitx.Run(ctx, root, "bundle", "verify", bundle); e != nil {
+		return restoreError("Git bundle prerequisites are unavailable", e)
+	}
+	// Fetch all advertised refs into an isolated namespace. In particular, stash
+	// and local branch refs at the recipient must not be replaced by fetch.
+	if _, e := gitx.Run(ctx, root, "-c", "core.hooksPath=/dev/null", "fetch", "--no-tags", "--no-write-fetch-head", bundle, "+refs/*:refs/onthego/incoming/*"); e != nil {
+		return restoreError("import bundled Git objects", e)
 	}
 	return nil
 }
 
-func restoreSelected(extracted, root string, file snapshot.File) error {
-	rel, err := packageotg.ProjectPath(file.RelativePath)
-	if err != nil {
-		return restoreError("manifest contains unsafe selected path", err)
-	}
-	if err := packageotg.CheckParents(root, rel); err != nil {
-		return restoreError("selected path traverses a symlink", err)
-	}
-	destination := filepath.Join(root, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-		return err
-	}
-	if err := os.RemoveAll(destination); err != nil {
-		return err
-	}
-	if file.Kind == "tombstone" {
-		return nil
-	}
-	source := filepath.Join(extracted, filepath.FromSlash(file.ArchivePath))
-	if file.Kind == "symlink" {
-		if filepath.IsAbs(file.LinkTarget) {
-			return restoreError("absolute selected symlink", nil)
-		}
-		resolved := filepath.Clean(filepath.Join(filepath.Dir(destination), file.LinkTarget))
-		outside, err := filepath.Rel(root, resolved)
-		if err != nil || outside == ".." || strings.HasPrefix(outside, ".."+string(filepath.Separator)) {
-			return restoreError("selected symlink escapes restore root", err)
-		}
-		return os.Symlink(file.LinkTarget, destination)
-	}
-	mode := fs.FileMode(file.Mode) & 0o777
-	if file.Secret {
-		mode = 0o600
-	}
-	if mode == 0 {
-		mode = 0o600
-	}
-	return copyRegular(source, destination, mode)
-}
-
-func verify(ctx context.Context, root, extracted string, manifest snapshot.Manifest) error {
-	head, err := gitx.Run(ctx, root, "rev-parse", "HEAD")
-	if err != nil || strings.TrimSpace(string(head.Stdout)) != manifest.SourceGitHead {
-		return restoreError("restored HEAD does not match manifest", err)
-	}
-	checks := []struct {
-		args     []string
-		expected string
-	}{
-		{[]string{"diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv"}, manifest.Git.IndexPatchSHA256},
-		{[]string{"diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv"}, manifest.Git.WorkPatchSHA256},
-	}
-	for _, check := range checks {
-		result, err := gitx.Run(ctx, root, check.args...)
-		if err != nil || hashBytes(result.Stdout) != check.expected {
-			return restoreError("restored Git diff does not match manifest", err)
+func validateState(ctx context.Context, root string, m snapshot.Manifest) error {
+	for _, id := range []string{m.SourceGitHead, m.Git.WIPCommit, m.Git.IndexTree, m.Git.WorktreeTree, m.Git.UntrackedTree} {
+		if !gitx.ValidOID(id) {
+			return restoreError("invalid Git object identifier", nil)
 		}
 	}
-	for _, file := range manifest.Files {
-		path := filepath.Join(root, filepath.FromSlash(file.RelativePath))
-		if file.Kind == "symlink" {
-			target, err := os.Readlink(path)
-			if err != nil || target != file.LinkTarget {
-				return restoreError("restored symlink does not match manifest", err)
+	actual, e := gitx.Text(ctx, root, "rev-parse", m.Git.WIPCommit+"^{tree}", m.Git.WIPCommit+"^1", m.Git.WIPCommit+"^2^{tree}", m.Git.WIPCommit+"^3^{tree}")
+	expected := strings.Join([]string{m.Git.WorktreeTree, m.SourceGitHead, m.Git.IndexTree, m.Git.UntrackedTree}, "\n")
+	if e != nil || actual != expected {
+		return restoreError("WIP commit does not match signed trees", e)
+	}
+	if m.SourceBranch != "" && m.SourceBranch != "(detached)" {
+		if _, e = gitx.Run(ctx, root, "check-ref-format", "--branch", m.SourceBranch); e != nil {
+			return restoreError("invalid source branch", e)
+		}
+	}
+	if m.Git.OriginURL != "" && gitx.SafeOriginURL(m.Git.OriginURL) != m.Git.OriginURL {
+		return restoreError("snapshot origin is unsafe", nil)
+	}
+	remaining := packageotg.MaxPayloadSize
+	for _, file := range m.Files {
+		if file.Secret {
+			remaining -= file.SizeBytes
+		}
+	}
+	if remaining < 0 {
+		return restoreError("secret files exceed workspace payload limit", nil)
+	}
+	if e = gitx.CheckWorkspaceSize(ctx, root, m.SourceGitHead, []string{m.Git.IndexTree, m.Git.WorktreeTree}, m.Git.UntrackedTree, remaining); e != nil {
+		return e
+	}
+	for _, tree := range []string{m.Git.IndexTree, m.Git.WorktreeTree, m.Git.UntrackedTree} {
+		entries, e := gitx.Tree(ctx, root, tree)
+		if e != nil {
+			return restoreError("read incoming Git tree", e)
+		}
+		for _, f := range entries {
+			if _, e = packageotg.ProjectPath(f.Path); e != nil {
+				return restoreError("unsafe path in Git tree", e)
 			}
-			continue
-		}
-		if file.Kind == "tombstone" {
-			continue
-		}
-		hash, err := hashFile(path)
-		if err != nil || hash != file.SHA256 {
-			return restoreError("restored selected file does not match manifest", err)
+			if f.Mode != "100644" && f.Mode != "100755" && f.Mode != "120000" {
+				return restoreError("unsupported Git file mode", nil)
+			}
+			if f.Mode == "120000" {
+				r, e := gitx.Run(ctx, root, "cat-file", "blob", f.OID)
+				if e != nil {
+					return e
+				}
+				if e = safeLink(f.Path, string(r.Stdout)); e != nil {
+					return e
+				}
+			}
 		}
 	}
-	_ = extracted
+	extras, e := gitx.Tree(ctx, root, m.Git.UntrackedTree)
+	if e != nil {
+		return e
+	}
+	files := map[string]snapshot.File{}
+	for _, f := range m.Files {
+		if !f.Secret {
+			files[f.RelativePath] = f
+		}
+	}
+	if len(extras) != len(files) {
+		return restoreError("managed tree differs from file manifest", nil)
+	}
+	for _, entry := range extras {
+		f, ok := files[entry.Path]
+		if !ok {
+			return restoreError("unsigned managed file in tree", nil)
+		}
+		r, e := gitx.Run(ctx, root, "cat-file", "blob", entry.OID)
+		if e != nil {
+			return e
+		}
+		hash := sha256.Sum256(r.Stdout)
+		if hex.EncodeToString(hash[:]) != f.SHA256 || int64(len(r.Stdout)) != f.SizeBytes {
+			return restoreError("managed file differs from signed metadata", nil)
+		}
+		if (entry.Mode == "120000") != (f.Kind == "symlink") {
+			return restoreError("managed file kind differs from signed metadata", nil)
+		}
+		if f.Kind == "symlink" && string(r.Stdout) != f.LinkTarget {
+			return restoreError("managed symlink differs from signed metadata", nil)
+		}
+	}
 	return nil
 }
 
-func copyTree(source, destination string) error {
-	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+// Apply changes working files in place. Existing Git configuration, hooks,
+// stash, reflogs, ignored directories and unmanaged files stay at their paths.
+// previousManaged contains the prior handoff's extra file names, including
+// names since deleted at the sender.
+func Apply(ctx context.Context, extracted, root string, m snapshot.Manifest, previousManaged []string, previousSecrets ...[]string) (_ Result, returnedErr error) {
+	root, e := fsx.Canonical(root)
+	if e != nil {
+		return Result{}, e
+	}
+	fresh := false
+	created := false
+	existedEmpty := false
+	var owned os.FileInfo
+	defer func() {
+		if returnedErr == nil || !created || owned == nil {
+			return
 		}
-		rel, err := filepath.Rel(source, path)
+		current, err := os.Lstat(root)
+		if err != nil || !os.SameFile(owned, current) {
+			return
+		}
+		if existedEmpty {
+			entries, err := os.ReadDir(root)
+			if err == nil {
+				for _, entry := range entries {
+					_ = os.RemoveAll(filepath.Join(root, entry.Name()))
+				}
+			}
+		} else {
+			_ = os.RemoveAll(root)
+		}
+	}()
+	if _, e = gitx.Run(ctx, root, "rev-parse", "--git-dir"); e != nil {
+		if info, err := os.Lstat(root); err == nil {
+			if !info.IsDir() {
+				return Result{}, restoreError("destination is not a directory", nil)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				return Result{}, err
+			}
+			if len(entries) > 0 {
+				return Result{}, restoreError("destination is not an empty directory or Git worktree", nil)
+			}
+			existedEmpty = true
+		} else if !os.IsNotExist(err) {
+			return Result{}, err
+		}
+		if e = os.MkdirAll(root, 0700); e != nil {
+			return Result{}, e
+		}
+		owned, e = os.Lstat(root)
+		if e != nil {
+			return Result{}, e
+		}
+		created = true
+		if _, e = gitx.Run(ctx, root, "init", "--quiet", objectFormatArgument(m.SourceGitHead)); e != nil {
+			return Result{}, e
+		}
+		fresh = true
+	} else if e = gitx.Validate(ctx, root); e != nil {
+		return Result{}, e
+	}
+	if e = importBundle(ctx, root, extracted, m); e != nil {
+		return Result{}, e
+	}
+	if e = validateState(ctx, root, m); e != nil {
+		return Result{}, e
+	}
+	state := gitx.WIP{Head: m.SourceGitHead, Branch: m.SourceBranch, Commit: m.Git.WIPCommit, IndexTree: m.Git.IndexTree, WorktreeTree: m.Git.WorktreeTree, UntrackedTree: m.Git.UntrackedTree}
+	if e = checkBranchWorktrees(ctx, root, state.Branch); e != nil {
+		return Result{}, e
+	}
+	old, e := managedBefore(ctx, root, previousManaged)
+	if e != nil {
+		return Result{}, e
+	}
+	desired, e := desiredEntries(ctx, root, state)
+	if e != nil {
+		return Result{}, e
+	}
+	addSecretEntries(desired, m.Files)
+	if e = checkCollisions(ctx, root, old, desired); e != nil {
+		return Result{}, e
+	}
+	var backup string
+	if !fresh {
+		var secretPaths []string
+		for _, paths := range previousSecrets {
+			secretPaths = append(secretPaths, paths...)
+		}
+		for _, file := range m.Files {
+			if file.Secret {
+				secretPaths = append(secretPaths, file.RelativePath)
+			}
+		}
+		backup, e = createBackup(ctx, root, previousManaged, desired, secretPaths, state.Branch)
+		if e != nil {
+			return Result{}, e
+		}
+	}
+	result := Result{Manifest: m, Root: root, Backup: backup}
+	var current map[string]gitx.TreeEntry
+	if backup != "" {
+		saved, err := readBackup(ctx, root, backup)
+		if err != nil {
+			return result, err
+		}
+		current, err = desiredEntries(ctx, root, saved.WIP)
+		if err != nil {
+			return result, err
+		}
+		addSecretEntries(current, saved.Files)
+	}
+	if e = applyState(ctx, root, state, m.Files, old, current, extracted); e != nil {
+		if backup != "" {
+			return result, &otgerror.Error{Code: otgerror.CodeRestoreFailed, Message: "in-place apply failed; restore with onthego undo", Cause: e, Preserved: backup}
+		}
+		return result, e
+	}
+	if fresh {
+		// Retain portable extra branches/tags/remotes only when creating a repository.
+		r, err := gitx.Run(ctx, root, "for-each-ref", "--format=%(refname) %(objectname)", "refs/onthego/incoming/heads", "refs/onthego/incoming/tags", "refs/onthego/incoming/remotes", "refs/onthego/incoming/stash")
+		if err != nil {
+			return result, err
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(r.Stdout)), "\n") {
+			f := strings.Fields(line)
+			if len(f) != 2 {
+				continue
+			}
+			ref := "refs/" + strings.TrimPrefix(f[0], "refs/onthego/incoming/")
+			if _, err = gitx.Run(ctx, root, "update-ref", ref, f[1]); err != nil {
+				return result, err
+			}
+		}
+		if m.Git.OriginURL != "" {
+			if _, e = gitx.Run(ctx, root, "remote", "add", "origin", m.Git.OriginURL); e != nil {
+				return result, e
+			}
+		}
+	}
+	if e = PruneBackups(ctx, root, DefaultBackupLimit); e != nil {
+		return result, e
+	}
+	return result, nil
+}
+
+func desiredEntries(ctx context.Context, root string, s gitx.WIP) (map[string]gitx.TreeEntry, error) {
+	out := map[string]gitx.TreeEntry{}
+	for _, tree := range []string{s.WorktreeTree, s.UntrackedTree} {
+		entries, e := gitx.Tree(ctx, root, tree)
+		if e != nil {
+			return nil, e
+		}
+		for _, entry := range entries {
+			out[entry.Path] = entry
+		}
+	}
+	for p := range out {
+		for parent := filepath.ToSlash(filepath.Dir(p)); parent != "."; parent = filepath.ToSlash(filepath.Dir(parent)) {
+			if _, ok := out[parent]; ok {
+				return nil, restoreError("incoming file has a file or symlink ancestor: "+p, nil)
+			}
+		}
+	}
+	return out, nil
+}
+
+func managedBefore(ctx context.Context, root string, previous []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, p := range previous {
+		if _, e := packageotg.ProjectPath(p); e != nil {
+			return nil, e
+		}
+		out[p] = true
+	}
+	r, e := gitx.Run(ctx, root, "ls-files", "-z")
+	if e != nil {
+		return nil, e
+	}
+	for _, p := range strings.Split(string(r.Stdout), "\x00") {
+		if p != "" {
+			out[p] = true
+		}
+	}
+	if head, e := gitx.Text(ctx, root, "rev-parse", "HEAD"); e == nil {
+		entries, e := gitx.Tree(ctx, root, head)
+		if e != nil {
+			return nil, e
+		}
+		for _, f := range entries {
+			out[f.Path] = true
+		}
+	}
+	return out, nil
+}
+
+func checkCollisions(ctx context.Context, root string, old map[string]bool, desired map[string]gitx.TreeEntry) error {
+	if err := checkTreeParents(desired); err != nil {
+		return err
+	}
+	for path := range desired {
+		if _, e := packageotg.ProjectPath(path); e != nil {
+			return e
+		}
+		// Reject all unmanaged entries, including ignored directories, before any
+		// destructive write. File-to-directory transitions of managed paths are OK.
+		for p := path; p != "."; p = filepath.ToSlash(filepath.Dir(p)) {
+			info, e := os.Lstat(filepath.Join(root, filepath.FromSlash(p)))
+			if os.IsNotExist(e) || errors.Is(e, syscall.ENOTDIR) {
+				continue
+			}
+			if e != nil {
+				return e
+			}
+			if p == path {
+				if info.IsDir() {
+					if e = directoryManaged(root, p, old); e != nil {
+						return e
+					}
+				} else if !old[p] {
+					same, err := sameLocalBlob(ctx, root, p, desired[p])
+					if err != nil {
+						return err
+					}
+					if !same {
+						return restoreError("incoming file would replace unmanaged local path: "+p, nil)
+					}
+					old[p] = true
+				}
+			} else if !info.IsDir() {
+				if !old[p] {
+					return restoreError("incoming path traverses unmanaged local file: "+p, nil)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func applyState(ctx context.Context, root string, s gitx.WIP, files []snapshot.File, old map[string]bool, current map[string]gitx.TreeEntry, secretRoot string) error {
+	desired, e := desiredEntries(ctx, root, s)
+	if e != nil {
+		return e
+	}
+	addSecretEntries(desired, files)
+	// Remove only managed leaves. Never recursively remove a local directory.
+	paths := make([]string, 0, len(old))
+	for p := range old {
+		paths = append(paths, p)
+	}
+	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
+	for _, p := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, ok := desired[p]; ok {
+			continue
+		}
+		path := filepath.Join(root, filepath.FromSlash(p))
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(destination, rel)
-		if entry.IsDir() {
-			return os.MkdirAll(target, 0o700)
+		if info.IsDir() {
+			continue
 		}
-		if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() {
-			return restoreError("context contains unsupported entry", nil)
+		if e = packageotg.CheckParents(root, p); e != nil {
+			return e
 		}
-		return copyRegular(path, target, 0o600)
+		if e = os.Remove(path); e != nil {
+			return e
+		}
+		pruneEmptyParents(root, filepath.Dir(path))
+	}
+	metadata := map[string]snapshot.File{}
+	for _, f := range files {
+		metadata[f.RelativePath] = f
+	}
+	paths = paths[:0]
+	for p := range desired {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entry := desired[p]
+		if prior, ok := current[p]; ok && prior.OID == entry.OID && prior.Mode == entry.Mode {
+			if f, ok := metadata[p]; ok && f.Kind != "symlink" {
+				mode := os.FileMode(f.Mode) & 0777
+				if f.Secret {
+					mode = 0600
+				}
+				if mode == 0 {
+					mode = 0600
+				}
+				info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(p)))
+				if err != nil {
+					return err
+				}
+				if info.Mode().IsRegular() && info.Mode().Perm() != mode {
+					if err = os.Chmod(filepath.Join(root, filepath.FromSlash(p)), mode); err != nil {
+						return err
+					}
+				}
+			}
+			continue
+		}
+		if e = packageotg.CheckParents(root, p); e != nil {
+			return e
+		}
+		path := filepath.Join(root, filepath.FromSlash(p))
+		if e = os.MkdirAll(filepath.Dir(path), 0700); e != nil {
+			return e
+		}
+		var content []byte
+		if f, ok := metadata[p]; ok && f.Secret {
+			content, e = os.ReadFile(filepath.Join(secretRoot, filepath.FromSlash(f.ArchivePath)))
+			if e == nil {
+				hash := sha256.Sum256(content)
+				if hex.EncodeToString(hash[:]) != f.SHA256 {
+					e = restoreError("secret payload hash mismatch", nil)
+				}
+			}
+		} else {
+			var r gitx.Result
+			r, e = gitx.Run(ctx, root, "cat-file", "blob", entry.OID)
+			content = r.Stdout
+		}
+		if e != nil {
+			return e
+		}
+		if e = os.Remove(path); e != nil && !os.IsNotExist(e) {
+			return e
+		}
+		if entry.Mode == "120000" {
+			if e = safeLink(p, string(content)); e != nil {
+				return e
+			}
+			if e = os.Symlink(string(content), path); e != nil {
+				return e
+			}
+			continue
+		}
+		mode := os.FileMode(0644)
+		if entry.Mode == "100755" {
+			mode = 0755
+		}
+		if f, ok := metadata[p]; ok {
+			mode = os.FileMode(f.Mode) & 0777
+			if f.Secret {
+				mode = 0600
+			}
+			if mode == 0 {
+				mode = 0600
+			}
+		}
+		if e = os.WriteFile(path, content, mode); e != nil {
+			return e
+		}
+	}
+	if _, e = gitx.Run(ctx, root, "read-tree", s.IndexTree); e != nil {
+		return e
+	}
+	if s.Branch != "" && s.Branch != "(detached)" {
+		ref := "refs/heads/" + s.Branch
+		if _, e = gitx.Run(ctx, root, "update-ref", "-m", "onthego handoff", ref, s.Head); e != nil {
+			return e
+		}
+		if _, e = gitx.Run(ctx, root, "symbolic-ref", "-m", "onthego handoff", "HEAD", ref); e != nil {
+			return e
+		}
+	} else {
+		if _, e = gitx.Run(ctx, root, "update-ref", "--no-deref", "-m", "onthego handoff", "HEAD", s.Head); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+func checkBranchWorktrees(ctx context.Context, root, branch string) error {
+	if branch == "" || branch == "(detached)" {
+		return nil
+	}
+	data, e := gitx.Run(ctx, root, "worktree", "list", "--porcelain", "-z")
+	if e != nil {
+		return e
+	}
+	var current string
+	for _, line := range strings.Split(string(data.Stdout), "\x00") {
+		if strings.HasPrefix(line, "worktree ") {
+			current = strings.TrimPrefix(line, "worktree ")
+			current, _ = fsx.Canonical(current)
+		}
+		if line == "branch refs/heads/"+branch && current != root {
+			return restoreError("incoming branch is checked out in another linked worktree: "+current, nil)
+		}
+	}
+	return nil
+}
+
+func safeLink(path, target string) error {
+	if target == "" || filepath.IsAbs(target) || strings.ContainsAny(target, "\\\x00") || (len(target) > 1 && target[1] == ':') {
+		return restoreError("unsafe Git symlink: "+path, nil)
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(filepath.FromSlash(path)), target))
+	if resolved == ".." || strings.HasPrefix(resolved, ".."+string(filepath.Separator)) {
+		return restoreError("Git symlink escapes project: "+path, nil)
+	}
+	return nil
+}
+
+func pruneEmptyParents(root, path string) {
+	for path != root && path != "." {
+		if e := os.Remove(path); e != nil {
+			return
+		}
+		path = filepath.Dir(path)
+	}
+}
+
+func tempDir(prefix string) (string, error) {
+	home, e := config.DataRoot()
+	if e != nil {
+		return "", e
+	}
+	return fsx.TempDir(home, prefix)
+}
+func restoreError(message string, err error) error {
+	return &otgerror.Error{Code: otgerror.CodeRestoreFailed, Message: message, Cause: err, Stage: "restore"}
+}
+
+func directoryManaged(root, relative string, old map[string]bool) error {
+	return filepath.WalkDir(filepath.Join(root, filepath.FromSlash(relative)), func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		p, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		p = filepath.ToSlash(p)
+		if !entry.IsDir() {
+			if !old[p] {
+				return restoreError("incoming file would replace unmanaged local path: "+p, nil)
+			}
+			return nil
+		}
+		prefix := p + "/"
+		for managed := range old {
+			if strings.HasPrefix(managed, prefix) {
+				return nil
+			}
+		}
+		return restoreError("incoming file would replace unmanaged local directory: "+p, nil)
 	})
 }
 
-func copyRegular(source, destination string, mode fs.FileMode) error {
-	input, err := os.Open(source)
-	if err != nil {
-		return err
+func sameLocalBlob(ctx context.Context, root, path string, entry gitx.TreeEntry) (bool, error) {
+	p := filepath.Join(root, filepath.FromSlash(path))
+	if strings.HasPrefix(entry.OID, "secret:") {
+		info, e := os.Lstat(p)
+		if e != nil {
+			return false, e
+		}
+		var data []byte
+		if info.Mode()&os.ModeSymlink != 0 {
+			if entry.Mode != "120000" {
+				return false, nil
+			}
+			target, e := os.Readlink(p)
+			if e != nil {
+				return false, e
+			}
+			data = []byte(target)
+		} else {
+			if !info.Mode().IsRegular() || entry.Mode == "120000" {
+				return false, nil
+			}
+			data, e = os.ReadFile(p)
+			if e != nil {
+				return false, e
+			}
+		}
+		hash := sha256.Sum256(data)
+		return hex.EncodeToString(hash[:]) == strings.TrimPrefix(entry.OID, "secret:"), nil
 	}
-	defer input.Close()
-	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
-	if err != nil {
-		return err
+	info, e := os.Lstat(p)
+	if e != nil {
+		return false, e
 	}
-	if err := output.Chmod(mode); err != nil {
-		output.Close()
-		return err
+	if info.Mode()&os.ModeSymlink != 0 {
+		if entry.Mode != "120000" {
+			return false, nil
+		}
+		target, e := os.Readlink(p)
+		if e != nil {
+			return false, e
+		}
+		r, e := gitx.RunInput(ctx, root, nil, []byte(target), "hash-object", "--stdin")
+		return strings.TrimSpace(string(r.Stdout)) == entry.OID, e
 	}
-	_, copyErr := io.Copy(output, input)
-	closeErr := output.Close()
-	if copyErr != nil {
-		return copyErr
+	if !info.Mode().IsRegular() || entry.Mode == "120000" {
+		return false, nil
 	}
-	return closeErr
+	actual, e := gitx.Text(ctx, root, "hash-object", "--no-filters", "--", path)
+	return actual == entry.OID, e
 }
 
-func hashFile(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
+func addSecretEntries(entries map[string]gitx.TreeEntry, files []snapshot.File) {
+	for _, f := range files {
+		if !f.Secret {
+			continue
+		}
+		mode := "100644"
+		if f.Kind == "symlink" {
+			mode = "120000"
+		} else if f.Mode&0111 != 0 {
+			mode = "100755"
+		}
+		entries[f.RelativePath] = gitx.TreeEntry{Mode: mode, OID: "secret:" + f.SHA256, Path: f.RelativePath}
 	}
-	defer file.Close()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func hashBytes(data []byte) string {
-	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:])
+func objectFormatArgument(head string) string {
+	if len(head) == 64 {
+		return "--object-format=sha256"
+	}
+	return "--object-format=sha1"
 }
 
-func restoreError(message string, err error) error {
-	return &otgerror.Error{Code: otgerror.CodeRestoreFailed, Message: message, Cause: err, Stage: "restore"}
+func checkTreeParents(entries map[string]gitx.TreeEntry) error {
+	for path := range entries {
+		for p := filepath.ToSlash(filepath.Dir(path)); p != "."; p = filepath.ToSlash(filepath.Dir(p)) {
+			if _, ok := entries[p]; ok {
+				return restoreError("incoming file has a file or symlink ancestor: "+path, nil)
+			}
+		}
+	}
+	return nil
 }
