@@ -28,24 +28,26 @@ import (
 )
 
 type Result struct {
-	Manifest       snapshot.Manifest          `json:"manifest"`
-	Root           string                     `json:"root"`
-	Backup         string                     `json:"backup,omitempty"`
-	Sessions       agentsessions.ImportResult `json:"sessions"`
-	AlreadyApplied bool                       `json:"already_applied,omitempty"`
-	Warnings       []string                   `json:"warnings,omitempty"`
+	Manifest        snapshot.Manifest          `json:"manifest"`
+	Root            string                     `json:"root"`
+	Backup          string                     `json:"backup,omitempty"`
+	Sessions        agentsessions.ImportResult `json:"sessions"`
+	AlreadyApplied  bool                       `json:"already_applied,omitempty"`
+	SessionsRetried bool                       `json:"sessions_retried,omitempty"`
+	Warnings        []string                   `json:"warnings,omitempty"`
 }
 type StatusInfo struct {
-	ProjectID    string    `json:"project_id"`
-	Root         string    `json:"root"`
-	SnapshotID   string    `json:"snapshot_id,omitempty"`
-	HasBaseline  bool      `json:"has_baseline"`
-	Changed      bool      `json:"changed"`
-	GitTips      []string  `json:"git_tips,omitempty"`
-	WIPCommit    string    `json:"wip_commit,omitempty"`
-	ActiveDevice string    `json:"active_device,omitempty"`
-	HandedOffAt  time.Time `json:"handed_off_at,omitempty"`
-	Warnings     []string  `json:"warnings,omitempty"`
+	SessionRecoveryPending bool      `json:"session_recovery_pending"`
+	ProjectID              string    `json:"project_id"`
+	Root                   string    `json:"root"`
+	SnapshotID             string    `json:"snapshot_id,omitempty"`
+	HasBaseline            bool      `json:"has_baseline"`
+	Changed                bool      `json:"changed"`
+	GitTips                []string  `json:"git_tips,omitempty"`
+	WIPCommit              string    `json:"wip_commit,omitempty"`
+	ActiveDevice           string    `json:"active_device,omitempty"`
+	HandedOffAt            time.Time `json:"handed_off_at,omitempty"`
+	Warnings               []string  `json:"warnings,omitempty"`
 }
 type baseline struct {
 	SchemaVersion      int                     `json:"schema_version"`
@@ -77,33 +79,39 @@ type ApplyOptions struct {
 	Sessions agentsessions.ImportOptions
 }
 
-func Export(ctx context.Context, root, output, recipient, version string, include, includeSecret []string) (snapshot.Manifest, error) {
-	return ExportWithOptions(ctx, root, output, recipient, version, ExportOptions{Include: include, IncludeSecret: includeSecret})
+type ExportResult struct {
+	snapshot.Manifest
+	Warnings []string `json:"warnings,omitempty"`
 }
-func ExportWithOptions(ctx context.Context, root, output, recipient, version string, opts ExportOptions) (snapshot.Manifest, error) {
+
+func Export(ctx context.Context, root, output, recipient, version string, include, includeSecret []string) (snapshot.Manifest, error) {
+	result, err := ExportWithOptions(ctx, root, output, recipient, version, ExportOptions{Include: include, IncludeSecret: includeSecret})
+	return result.Manifest, err
+}
+func ExportWithOptions(ctx context.Context, root, output, recipient, version string, opts ExportOptions) (ExportResult, error) {
 	root, err := safeTarget(root)
 	if err != nil {
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
 	unlock, err := lock(root)
 	if err != nil {
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
 	defer unlock()
 	cfg, err := config.Load(root)
 	if err != nil {
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
 	previous, err := readBaseline(root, cfg.ProjectID)
 	if err != nil {
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
 	if _, err := pendingBaselines(root, cfg.ProjectID); err != nil {
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
 	keys, err := identity.LoadOrCreate()
 	if err != nil {
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
 	var target age.Recipient
 	if recipient == "" {
@@ -112,40 +120,41 @@ func ExportWithOptions(ctx context.Context, root, output, recipient, version str
 		target, err = age.ParseX25519Recipient(recipient)
 	}
 	if err != nil {
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
-	roots, err := sessionRoots(cfg)
+	roots, err := SessionRoots(cfg)
 	if err != nil {
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
 	home, err := config.DataRoot()
 	if err != nil {
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
 	contextDir, err := fsx.TempDir(home, "context-")
 	if err != nil {
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
 	defer fsx.ReleaseTemp(contextDir)
 	native, err := agentsessions.ExportWithOptions(root, filepath.Join(contextDir, "native-sessions"), roots, opts.Selection)
 	if err != nil {
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
 	options := effectiveOptions(root, cfg, previous, opts.Include, opts.IncludeSecret)
 	options.Output, options.ContextDir, options.Recipient, options.Keys, options.OnthegoVersion = output, contextDir, target, keys, version
 	options.ParentSnapshotID = previous.SnapshotID
+	options.PreviousManaged = previous.Managed
 	options.ParentWIPCommit = previous.WIPCommit
 	options.RecipientTips = opts.RecipientTips
 	created, err := capture.Create(ctx, options)
 	if err != nil {
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
 	// Session metadata hashes are cached by file identity, size, and mtime. This
 	// stability check does not reread every unchanged transcript.
 	after, err := agentsessions.DiscoverWithOptions(root, roots, opts.Selection)
 	if err != nil || sessionFingerprint(native.Sessions) != sessionFingerprint(after.Sessions) {
 		_ = os.Remove(output)
-		return snapshot.Manifest{}, otgerror.Wrap(otgerror.CodeSourceChanged, "native agent sessions changed during capture; stop active agents and retry", err)
+		return ExportResult{}, otgerror.Wrap(otgerror.CodeSourceChanged, "native agent sessions changed during capture; stop active agents and retry", err)
 	}
 	pending := baseline{SchemaVersion: 2, ProjectID: cfg.ProjectID, Root: root, SnapshotID: created.Manifest.SnapshotID, WIPCommit: created.Manifest.Git.WIPCommit, Fingerprint: created.Fingerprint, SessionFingerprint: sessionFingerprint(native.Sessions), Selection: opts.Selection, Include: options.Include, IncludeSecret: options.IncludeSecret, Peer: opts.Peer, UpdatedAt: time.Now().UTC()}
 	for _, file := range created.Manifest.Files {
@@ -153,16 +162,22 @@ func ExportWithOptions(ctx context.Context, root, output, recipient, version str
 	}
 	path, err := pendingPath(root, cfg.ProjectID, pending.SnapshotID)
 	if err == nil {
-		err = writeJSON(path, pending)
+		err = recordPending(ctx, root, path, pending)
 	}
 	if err == nil {
 		_, err = pendingBaselines(root, cfg.ProjectID)
 	}
 	if err != nil {
 		_ = os.Remove(output)
-		return snapshot.Manifest{}, err
+		return ExportResult{}, err
 	}
-	return created.Manifest, nil
+	warnings := append([]string{}, native.Warnings...)
+	warnings = append(warnings, after.Warnings...)
+	warnings = append(warnings, policyWarnings(cfg, previous)...)
+	for _, path := range created.ExcludedFiles {
+		warnings = append(warnings, "Secret candidate not transferred: "+path)
+	}
+	return ExportResult{Manifest: created.Manifest, Warnings: unique(warnings)}, nil
 }
 func Preview(ctx context.Context, root string, include, includeSecret []string) ([]capture.PreviewFile, error) {
 	root, err := safeTarget(root)
@@ -199,9 +214,9 @@ func MarkSyncedPeer(ctx context.Context, root, snapshotID, peer string) error {
 	if err != nil {
 		return err
 	}
-	return acknowledge(root, cfg.ProjectID, snapshotID, peer)
+	return acknowledge(ctx, root, cfg.ProjectID, snapshotID, peer)
 }
-func acknowledge(root, projectID, snapshotID, peer string) error {
+func acknowledge(ctx context.Context, root, projectID, snapshotID, peer string) error {
 	path, err := pendingPath(root, projectID, snapshotID)
 	if err != nil {
 		return err
@@ -236,7 +251,7 @@ func acknowledge(root, projectID, snapshotID, peer string) error {
 		if err := writeJSON(receipt, pending); err != nil {
 			return err
 		}
-		return os.Remove(path)
+		return removePending(ctx, root, path, snapshotID)
 	}
 	if peer != "" {
 		pending.Peer = peer
@@ -248,7 +263,7 @@ func acknowledge(root, projectID, snapshotID, peer string) error {
 	if err := saveBaseline(pending); err != nil {
 		return err
 	}
-	return os.Remove(path)
+	return removePending(ctx, root, path, snapshotID)
 }
 
 // ReconcilePending recovers a lost acknowledgment from the authenticated
@@ -307,6 +322,14 @@ func Status(ctx context.Context, root string) (StatusInfo, error) {
 	if result.ActiveDevice != "" {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("This workspace was handed to %s at %s. Pull before editing or resuming its agent sessions.", result.ActiveDevice, result.HandedOffAt.Format(time.RFC3339)))
 	}
+	recovery, recoveryErr := readRecovery(root, cfg.ProjectID)
+	if recoveryErr != nil {
+		return StatusInfo{}, recoveryErr
+	}
+	result.SessionRecoveryPending = recovery.SnapshotID != ""
+	if result.SessionRecoveryPending {
+		result.Warnings = append(result.Warnings, "Native session recovery is pending; run onthego sessions recover.")
+	}
 	if !result.HasBaseline {
 		return result, nil
 	}
@@ -314,7 +337,7 @@ func Status(ctx context.Context, root string) (StatusInfo, error) {
 	if err != nil {
 		return StatusInfo{}, err
 	}
-	roots, err := sessionRoots(cfg)
+	roots, err := SessionRoots(cfg)
 	if err != nil {
 		return StatusInfo{}, err
 	}
@@ -384,6 +407,17 @@ func ApplyWithOptions(ctx context.Context, packagePath, root, trustedSigner stri
 	// Idempotency must be checked before the dirty-workspace gate: replaying an
 	// acknowledged package must never clobber edits made after that application.
 	if previous.SnapshotID == manifest.SnapshotID {
+		recovery, err := readRecovery(root, manifest.ProjectID)
+		if err != nil {
+			return Result{}, err
+		}
+		if recovery.SnapshotID == manifest.SnapshotID {
+			cfg, err := config.Load(root)
+			if err != nil {
+				return Result{}, err
+			}
+			return retrySessions(ctx, root, cfg, previous, recovery, filepath.Join(extracted, "context", "native-sessions"), manifest, opts.Sessions)
+		}
 		return Result{Manifest: manifest, Root: root, AlreadyApplied: true}, nil
 	}
 	cfg, err := restore.Config(ctx, extracted, manifest, root)
@@ -402,7 +436,7 @@ func ApplyWithOptions(ctx context.Context, packagePath, root, trustedSigner stri
 			return Result{}, err
 		}
 	}
-	roots, err := sessionRoots(cfg)
+	roots, err := SessionRoots(cfg)
 	if err != nil {
 		return Result{}, err
 	}
@@ -441,7 +475,7 @@ func ApplyWithOptions(ctx context.Context, packagePath, root, trustedSigner stri
 	if err != nil {
 		return Result{}, err
 	}
-	result := Result{Manifest: manifest, Root: root, Backup: restored.Backup}
+	result := Result{Manifest: manifest, Root: root, Backup: restored.Backup, Warnings: restored.Warnings}
 	if hasSessions {
 		result.Sessions, err = agentsessions.ImportWithOptions(native, root, roots, opts.Sessions)
 		if err != nil {
@@ -454,6 +488,11 @@ func ApplyWithOptions(ctx context.Context, packagePath, root, trustedSigner stri
 			if keepErr != nil {
 				return result, &otgerror.Error{Code: otgerror.CodeRestoreFailed, Message: "workspace applied but session recovery could not be preserved", Preserved: result.Backup, Cause: errors.Join(err, keepErr)}
 			}
+			recovery := sessionRecovery{SnapshotID: manifest.SnapshotID, RecoveryDir: preserved, CreatedAt: time.Now().UTC(), Error: otgerror.Public(err).Message}
+			if saveErr := saveRecovery(root, cfg.ProjectID, recovery); saveErr != nil {
+				return result, otgerror.Wrap(otgerror.CodeRestoreFailed, "workspace applied but session recovery state could not be saved", saveErr)
+			}
+			result.Sessions.Status = "recovery_needed"
 			result.Warnings = append(result.Warnings, "Workspace applied; native session import needs attention: "+err.Error()+". Preserved at "+preserved)
 		}
 	}
@@ -465,6 +504,9 @@ func ApplyWithOptions(ctx context.Context, packagePath, root, trustedSigner stri
 		} else if file.PolicySource == "include" {
 			next.Include = append(next.Include, file.RelativePath)
 		}
+	}
+	if !hasSessions {
+		next.Selection.None = true
 	}
 	next.Include, next.IncludeSecret = unique(next.Include), unique(next.IncludeSecret)
 	next.Fingerprint, err = capture.Fingerprint(ctx, optionsFor(root, cfg, next))
@@ -516,19 +558,27 @@ func acceptedBaseline(ctx context.Context, root, projectID string, previous base
 		return baseline{}, "", err
 	}
 	if previous.SnapshotID != "" {
-		candidates = append([]baseline{previous}, candidates...)
+		candidates = append(candidates, previous)
+		sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].UpdatedAt.After(candidates[j].UpdatedAt) })
 	}
 	cfg, err := config.Load(root)
 	if err != nil {
 		return baseline{}, "", err
 	}
 	policyKey := func(state baseline) string {
-		data, _ := json.Marshal([][]string{state.Include, state.IncludeSecret})
+		data, _ := json.Marshal([][]string{state.Include, state.IncludeSecret, state.Managed})
 		return string(data)
 	}
 	fingerprints := map[string]string{policyKey(previous): initialFingerprint}
 	for _, candidate := range candidates {
 		if candidate.WIPCommit == "" {
+			continue
+		}
+		exists, err := pendingCommitExists(ctx, root, candidate.WIPCommit)
+		if err != nil {
+			return baseline{}, "", err
+		}
+		if !exists {
 			continue
 		}
 		ok, err := gitx.IsAncestor(ctx, root, candidate.WIPCommit, manifest.Git.WIPCommit)
@@ -596,8 +646,7 @@ func Undo(ctx context.Context, root, ref string) (restore.Result, error) {
 		return restore.Result{}, err
 	}
 	defer unlock()
-	cfg, err := config.Load(root)
-	if err != nil {
+	if err := gitx.Validate(ctx, root); err != nil {
 		return restore.Result{}, err
 	}
 	result, err := restore.Undo(ctx, root, ref)
@@ -605,15 +654,25 @@ func Undo(ctx context.Context, root, ref string) (restore.Result, error) {
 		return result, err
 	}
 	// Undo restores work, not proof that another peer has received it.
-	path, err := statePath(root, cfg.ProjectID)
+	home, err := config.DataRoot()
 	if err != nil {
 		return result, err
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	paths, err := filepath.Glob(filepath.Join(home, "projects", "*", "handoff", digest([]byte(root)), "current.json"))
+	if err != nil {
 		return result, err
+	}
+	for _, path := range paths {
+		if err := checkStatePath(path); err != nil {
+			return result, err
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return result, err
+		}
 	}
 	return result, nil
 }
+
 func preserveSessionBundle(source, target string) error {
 	if err := checkStatePath(target); err != nil {
 		return err
@@ -642,15 +701,18 @@ func preserveSessionBundle(source, target string) error {
 	})
 }
 func optionsFor(root string, cfg config.Config, state baseline) capture.Options {
-	return capture.Options{Root: root, Config: cfg, Include: state.Include, IncludeSecret: existingPaths(root, state.IncludeSecret)}
+	return capture.Options{Root: root, Config: cfg, FingerprintManaged: state.Managed, FingerprintSecret: state.IncludeSecret, Include: state.Include, IncludeSecret: existingPaths(root, permittedSecrets(cfg, state.IncludeSecret))}
 }
 func effectiveOptions(root string, cfg config.Config, state baseline, include, includeSecret []string) capture.Options {
 	options := optionsFor(root, cfg, state)
+	options.FingerprintManaged, options.FingerprintSecret = nil, nil
 	options.Include = unique(append(append([]string{}, options.Include...), include...))
 	options.IncludeSecret = unique(append(options.IncludeSecret, includeSecret...))
 	return options
 }
-func sessionRoots(cfg config.Config) (agentsessions.Roots, error) {
+
+// SessionRoots applies the validated project agent scope consistently.
+func SessionRoots(cfg config.Config) (agentsessions.Roots, error) {
 	roots, err := agentsessions.DefaultRoots()
 	if cfg.Agent == "none" {
 		roots = agentsessions.Roots{}
@@ -699,3 +761,57 @@ func unique(values []string) []string {
 	return result
 }
 func digest(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
+
+func permittedSecrets(cfg config.Config, paths []string) []string {
+	var out []string
+	for _, path := range paths {
+		if !capture.Excluded(path, cfg.Exclude) {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+func policyWarnings(cfg config.Config, state baseline) []string {
+	var warnings []string
+	for _, path := range state.IncludeSecret {
+		if capture.Excluded(path, cfg.Exclude) {
+			warnings = append(warnings, "Previously included secret excluded by project policy: "+path)
+		}
+	}
+	return warnings
+}
+
+// PreviewWarnings reports persisted selections removed by the current policy.
+func PreviewWarnings(root string) ([]string, error) {
+	root, err := safeTarget(root)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.Load(root)
+	if err != nil {
+		return nil, err
+	}
+	previous, err := readBaseline(root, cfg.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	return policyWarnings(cfg, previous), nil
+}
+
+// PruneBackups obeys the same per-workspace exclusion as apply and undo.
+func PruneBackups(ctx context.Context, root string, keep int) error {
+	root, err := safeTarget(root)
+	if err != nil {
+		return err
+	}
+	if err := gitx.Validate(ctx, root); err != nil {
+		return err
+	}
+	unlock, err := lock(root)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return restore.PruneBackups(ctx, root, keep)
+}

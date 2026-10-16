@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -152,6 +153,8 @@ func saveBaseline(saved baseline) error {
 	return writeJSON(path, saved)
 }
 func pendingBaselines(root, projectID string) ([]baseline, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	current, err := statePath(root, projectID)
 	if err != nil {
 		return nil, err
@@ -162,7 +165,7 @@ func pendingBaselines(root, projectID string) ([]baseline, error) {
 	}
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
-		return nil, nil
+		return nil, pruneOrphanPendingRefs(ctx, root)
 	}
 	if err != nil {
 		return nil, err
@@ -180,8 +183,11 @@ func pendingBaselines(root, projectID string) ([]baseline, error) {
 		if err := validateBaseline(saved, root, projectID); err != nil {
 			return nil, err
 		}
+		if entry.Name() != saved.SnapshotID+".json" {
+			return nil, otgerror.New(otgerror.CodeInternal, "pending snapshot ID mismatch")
+		}
 		if time.Since(saved.UpdatedAt) > pendingTTL {
-			if err := os.Remove(path); err != nil {
+			if err := removePending(ctx, root, path, saved.SnapshotID); err != nil {
 				return nil, err
 			}
 			continue
@@ -192,12 +198,15 @@ func pendingBaselines(root, projectID string) ([]baseline, error) {
 	// Pending exports are recoverable for 30 days, bounded to the newest 64.
 	for _, saved := range result[min(len(result), 64):] {
 		path, _ := pendingPath(root, projectID, saved.SnapshotID)
-		if err := os.Remove(path); err != nil {
+		if err := removePending(ctx, root, path, saved.SnapshotID); err != nil {
 			return nil, err
 		}
 	}
 	if len(result) > 64 {
 		result = result[:64]
+	}
+	if err := pruneOrphanPendingRefs(ctx, root); err != nil {
+		return nil, err
 	}
 	return result, nil
 }

@@ -36,9 +36,14 @@ type Options struct {
 	ParentSnapshotID string
 	RecipientTips    []string
 	ParentWIPCommit  string
-	OnthegoVersion   string
-	Recipient        age.Recipient
-	Keys             identity.Keys
+	PreviousManaged  []string
+	// FingerprintManaged preserves comparison with a receipt written by an older
+	// selection policy. These paths never opt files into a snapshot.
+	FingerprintManaged []string
+	FingerprintSecret  []string
+	OnthegoVersion     string
+	Recipient          age.Recipient
+	Keys               identity.Keys
 }
 
 type Result struct {
@@ -71,9 +76,7 @@ func Preview(ctx context.Context, options Options) ([]PreviewFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, path := range excluded {
-		result = append(result, PreviewFile{RelativePath: path, Secret: true, Policy: "secret candidate; use --include-secret for permitted files", Excluded: true})
-	}
+	result = append(result, excluded...)
 	sort.Slice(result, func(i, j int) bool { return result[i].RelativePath < result[j].RelativePath })
 	return result, nil
 }
@@ -178,6 +181,10 @@ func Create(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	manifest.RetainedPaths, err = retainedPaths(ctx, root, options.PreviousManaged, selected, state)
+	if err != nil {
+		return Result{}, err
+	}
 	manifest.SourceGitHead = state.Head
 	manifest.SourceBranch = state.Branch
 	manifest.Git = snapshot.Git{Ref: state.Branch, WIPCommit: state.Commit, IndexTree: state.IndexTree, WorktreeTree: state.WorktreeTree, UntrackedTree: state.UntrackedTree}
@@ -211,6 +218,10 @@ func Create(ctx context.Context, options Options) (Result, error) {
 			return Result{}, err
 		}
 	}
+	manifest.PayloadSizes, err = packageotg.PayloadSizesContext(ctx, payload)
+	if err != nil {
+		return Result{}, err
+	}
 	if err = manifest.SetSnapshotID(); err != nil {
 		return Result{}, err
 	}
@@ -232,26 +243,41 @@ func Create(ctx context.Context, options Options) (Result, error) {
 	if err = packageotg.CreateContext(ctx, payload, options.Output, manifest, options.Recipient, signer); err != nil {
 		return Result{}, err
 	}
-	return Result{Manifest: manifest, Output: options.Output, ExcludedFiles: omitted, Fingerprint: before}, nil
+	excludedPaths := make([]string, 0, len(omitted))
+	for _, file := range omitted {
+		excludedPaths = append(excludedPaths, file.RelativePath)
+	}
+	return Result{Manifest: manifest, Output: options.Output, ExcludedFiles: excludedPaths, Fingerprint: before}, nil
 }
 
-func excludedFiles(ctx context.Context, options Options, selected []selectedFile) ([]string, error) {
+func excludedFiles(ctx context.Context, options Options, selected []selectedFile) ([]PreviewFile, error) {
 	accepted := map[string]bool{}
 	for _, f := range selected {
 		accepted[f.Relative] = true
 	}
-	r, e := gitx.Run(ctx, options.Root, "ls-files", "--others", "--exclude-standard", "-z")
-	if e != nil {
-		return nil, e
-	}
-	var out []string
-	for _, p := range bytes.Split(r.Stdout, []byte{0}) {
-		s := string(p)
-		if s != "" && !accepted[s] && !excluded(s, options.Config.Exclude) && (isSecretCandidate(s) || alwaysDenied(s)) {
-			out = append(out, s)
+	var out []PreviewFile
+	for _, ignored := range []bool{false, true} {
+		args := []string{"ls-files", "--others", "--exclude-standard", "-z"}
+		policy := "secret candidate; use --include-secret for permitted files"
+		if ignored {
+			// Collapse ignored directories instead of walking dependency trees.
+			args = append(args, "--ignored", "--directory")
+			policy = "ignored secret candidate; not transferred"
+		}
+		r, err := gitx.Run(ctx, options.Root, args...)
+		if err != nil {
+			return nil, err
+		}
+		for _, raw := range bytes.Split(r.Stdout, []byte{0}) {
+			path := string(raw)
+			name := strings.TrimSuffix(path, "/")
+			if path != "" && !accepted[path] && !excluded(name, options.Config.Exclude) && (isSecretCandidate(name) || alwaysDenied(path)) {
+				out = append(out, PreviewFile{RelativePath: path, Secret: true, Policy: policy, Excluded: true})
+				accepted[path] = true
+			}
 		}
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].RelativePath < out[j].RelativePath })
 	return out, nil
 }
 
@@ -450,11 +476,51 @@ func Fingerprint(ctx context.Context, options Options) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	selected, err = fingerprintFiles(options, selected)
+	if err != nil {
+		return "", err
+	}
 	data, err := fingerprint(ctx, options.Root, selected)
 	if err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(data), nil
+}
+
+func fingerprintFiles(options Options, selected []selectedFile) ([]selectedFile, error) {
+	if len(options.FingerprintManaged) == 0 {
+		return selected, nil
+	}
+	chosen := make(map[string]selectedFile, len(selected)+len(options.FingerprintManaged))
+	for _, file := range selected {
+		chosen[file.Relative] = file
+	}
+	secret := make(map[string]bool, len(options.FingerprintSecret))
+	for _, path := range options.FingerprintSecret {
+		secret[path] = true
+	}
+	for _, path := range options.FingerprintManaged {
+		if _, exists := chosen[path]; exists {
+			continue
+		}
+		info, err := lstatWorkspacePath(options.Root, path)
+		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if info.IsDir() {
+			continue
+		}
+		chosen[path] = selectedFile{Relative: path, Secret: secret[path]}
+	}
+	result := make([]selectedFile, 0, len(chosen))
+	for _, file := range chosen {
+		result = append(result, file)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Relative < result[j].Relative })
+	return result, nil
 }
 
 func fingerprint(ctx context.Context, root string, selected []selectedFile) ([]byte, error) {
@@ -488,15 +554,12 @@ func fingerprint(ctx context.Context, root string, selected []selectedFile) ([]b
 		}
 		write([]byte(path))
 		absolute := filepath.Join(root, filepath.FromSlash(path))
-		info, err := os.Lstat(absolute)
+		info, err := lstatWorkspacePath(root, path)
 		if missingOK && (os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR)) {
 			write([]byte("missing"))
 			return nil
 		}
 		if err != nil {
-			return err
-		}
-		if err = fsx.CheckParents(root, path); err != nil {
 			return err
 		}
 		if missingOK && info.IsDir() {
@@ -623,5 +686,78 @@ func alwaysDenied(path string) bool {
 
 func isSecretCandidate(path string) bool {
 	base := strings.ToLower(filepath.Base(path))
+	switch base {
+	case ".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".netrc", "_netrc", ".git-credentials", ".pgpass", ".envrc", ".dockercfg", "kubeconfig":
+		return true
+	}
+	for _, suffix := range []string{".pfx", ".jks", ".keystore", ".tfvars", ".tfstate", ".tfstate.backup"} {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
 	return base == ".env" || strings.HasPrefix(base, ".env.") || strings.HasSuffix(base, ".env") || strings.HasSuffix(base, ".pem") || strings.HasPrefix(base, "id_") || strings.HasSuffix(base, ".p12")
 }
+
+// retainedPaths distinguishes ending supplemental management from source deletion.
+// Git-tracked paths retain Git's ordinary deletion semantics.
+func retainedPaths(ctx context.Context, root string, previous []string, selected []selectedFile, state gitx.WIP) ([]string, error) {
+	wanted := map[string]bool{}
+	for _, file := range selected {
+		wanted[file.Relative] = true
+	}
+	for _, tree := range []string{state.Head, state.IndexTree, state.WorktreeTree} {
+		entries, err := gitx.Tree(ctx, root, tree)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			wanted[entry.Path] = true
+		}
+	}
+	var retained []string
+	for _, path := range previous {
+		if wanted[path] {
+			continue
+		}
+		if _, err := lstatWorkspacePath(root, path); os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		wanted[path] = true
+		retained = append(retained, path)
+	}
+	sort.Strings(retained)
+	return retained, nil
+}
+
+// lstatWorkspacePath checks each parent without following symbolic links. A
+// former directory replaced by a regular file makes its old children missing,
+// while a symbolic-link parent is unsafe even when its target no longer exists.
+func lstatWorkspacePath(root, path string) (os.FileInfo, error) {
+	if _, err := packageotg.ProjectPath(path); err != nil {
+		return nil, err
+	}
+	current, err := fsx.Canonical(root)
+	if err != nil {
+		return nil, err
+	}
+	parts := strings.Split(path, "/")
+	for _, part := range parts[:len(parts)-1] {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, otgerror.New(otgerror.CodeSecretPolicy, "path contains a symbolic link inside the selected root: "+current)
+		}
+		if !info.IsDir() {
+			return nil, &os.PathError{Op: "lstat", Path: filepath.Join(root, filepath.FromSlash(path)), Err: syscall.ENOTDIR}
+		}
+	}
+	return os.Lstat(filepath.Join(current, parts[len(parts)-1]))
+}
+
+// Excluded reports whether project policy excludes a supplemental path.
+func Excluded(path string, patterns []string) bool { return excluded(path, patterns) }
