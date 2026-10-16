@@ -10,7 +10,11 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -23,4 +27,25 @@ jobs:
       - run: go test -race ./...
       - run: make build
       - run: ./scripts/demo.sh
+      - run: python3 scripts/sigint-e2e.py
+      - run: python3 scripts/benchmark.py --profile smoke --output benchmark.json
+      - name: Install tested native agent versions
+        run: npm install --prefix "$RUNNER_TEMP/agent-clis" @openai/codex@0.163.0 @anthropic-ai/claude-code@2.1.301 --no-audit --no-fund
+      - name: Verify native agent resume without copied authentication or databases
+        run: python3 scripts/agent-compatibility/verify.py --codex "$RUNNER_TEMP/agent-clis/node_modules/.bin/codex" --claude "$RUNNER_TEMP/agent-clis/node_modules/.bin/claude"
       - run: make package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.os }}
+          path: benchmark.json
+
+  ssh-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y openssh-server
+      - run: make build
+      - run: ./scripts/ssh-e2e.sh

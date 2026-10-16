@@ -1,27 +1,30 @@
-# Handoff demo
+# Reproduce a handoff
 
-Run the deterministic local demo from this checkout:
+Build the CLI and run the isolated local demo:
 
 ```sh
 make build
 ./scripts/demo.sh
 ```
 
-The script uses temporary directories and its own `ONTHEGO_HOME`. It creates a Git project, makes staged and unstaged edits, adds an untracked file and an explicitly included ignored file, transfers an encrypted snapshot to a local peer, and checks the restored content. It never connects to a hosted service or reads your own agent session directories. All temporary data is removed on exit.
+The demo creates disposable repositories and private ONTHEGO and agent homes. It checks unfinished Git state, secret selection, native histories, a destination edit, and the return handoff. It does not read your real agent sessions or credentials.
 
-For the real desktop/laptop flow, install the same ONTHEGO version and Git on both machines, authenticate Codex/Claude on each, and establish trusted SSH access:
+For a real SSH subprocess roundtrip:
 
 ```sh
-cd /path/to/project
-onthego init
-onthego device add laptop --host my-laptop --path /absolute/path/to/project
-onthego doctor laptop
-onthego push laptop --dry-run
-
-# Stop the project's coding agent and other active writers before handing off.
-onthego push laptop
+./scripts/ssh-e2e.sh
 ```
 
-On the laptop, inspect `onthego status` and resume the relevant reported session ID with `codex resume <id>` or `claude --resume <id>`. After stopping the laptop's agent, run `onthego pull laptop` from the original project on the desktop to return the work.
+The script starts a temporary OpenSSH server with isolated keys and host verification. It pairs a device, sends staged and unstaged work, edits the destination over SSH, and pulls the changes back. Linux may require permission to create the isolated SSH account. A supported rootless sshd configuration is used on macOS.
 
-For local testing only, `device add copy --local-path /absolute/absent/path` selects a directory on this machine instead of SSH. This verifies packaging, encryption, conflict checks, and restoration without proving network or native agent version compatibility.
+Verify interrupt recovery and performance separately:
+
+```sh
+python3 scripts/sigint-e2e.py
+python3 scripts/benchmark.py --profile smoke --output /tmp/onthego-smoke.json
+python3 scripts/benchmark.py --profile full --output /tmp/onthego-full.json
+```
+
+The full profile creates 100,000 ignored dependency files per device, a 1 GiB Git history, and 500 sessions. It measures initial and incremental transfers and a return handoff. It checks that destination roots, Git directories, and ignored file inodes stay unchanged. It takes substantially more disk space and time than the smoke profile.
+
+Real CLI resume checks are described in [agent compatibility](agent-compatibility.md). Their local provider fixture isolates transcript-format compatibility from model-service availability.

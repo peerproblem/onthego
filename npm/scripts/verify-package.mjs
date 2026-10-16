@@ -15,6 +15,11 @@ const expected = new Set([
   ...binaries,
 ]);
 
+const { version } = JSON.parse(await readFile("package.json", "utf8"));
+if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+  throw new Error(`Package version must be canonical semver without a v prefix: ${version}`);
+}
+
 for (const file of ["npm/bin/onthego.js", ...binaries]) {
   await access(file, constants.R_OK | constants.X_OK);
 }
@@ -27,6 +32,14 @@ for (const file of binaries) {
   }
 }
 
+const native = `npm/vendor/onthego-${process.platform}-${process.arch === "x64" ? "amd64" : process.arch}`;
+if (binaries.includes(native)) {
+  const result = spawnSync(`./${native}`, ["version"], { encoding: "utf8" });
+  if (result.status !== 0 || !result.stdout.split(/\s+/).includes(version)) {
+    throw new Error(`Native binary version does not match package ${version}: ${result.stdout}${result.stderr}`);
+  }
+}
+
 // Inspect npm's actual allowlist without recursively invoking this prepack hook.
 const result = spawnSync("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], {
   encoding: "utf8",
@@ -34,7 +47,13 @@ const result = spawnSync("npm", ["pack", "--dry-run", "--ignore-scripts", "--jso
 if (result.status !== 0) {
   throw new Error(`npm package inspection failed: ${result.stderr}`);
 }
-const [pack] = JSON.parse(result.stdout);
+const inspection = JSON.parse(result.stdout);
+// npm 10/11 emit an array; newer npm emits an object keyed by package name.
+const packages = Array.isArray(inspection) ? inspection : Object.values(inspection);
+if (packages.length !== 1 || !Array.isArray(packages[0]?.files)) {
+  throw new Error("npm package inspection returned an unexpected manifest");
+}
+const [pack] = packages;
 const actual = new Set(pack.files.map(({ path }) => path));
 for (const file of actual) {
   if (!expected.has(file)) throw new Error(`Unexpected package file: ${file}`);

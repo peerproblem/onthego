@@ -1,43 +1,77 @@
-# 0.2 implementation record
+# 0.3 implementation and validation
 
-Updated 2026-10-16.
+The source requirements are `.hov/CLAUDE_FEEDBACK.md` dated 2026-10-16. The owner selected the 0.3 Git redesign. Tailscale remains optional, the target is CLI users, and continuous synchronization or user-owned asynchronous storage is future work.
 
-This implementation replaces the former hosted-service architecture with the explicit direct-device handoff described in [architecture.md](architecture.md). This document describes the current checkout; it does not claim that 0.2 has been published to npm or GitHub Releases.
+Implementation uses `v2-fan` with separate ownership for Git storage, session adapters, filesystem lifecycle, peer CLI, compatibility evidence, and validation scripts. Integration and publication remain root-owned.
 
-## Implemented
+## Feedback coverage
 
-- Project schema 2 and personal `~/.onthego/` configuration.
-- Trusted SSH peers with pinned public encryption/signing identities.
-- Encrypted signed workspace snapshots and local-device transport for offline testing.
-- Git history, staged/unstaged changes, allowed untracked files, and selected ignored files.
-- Native project-scoped Codex/Claude session history and destination path mapping.
-- Conflict detection, explicit replacement, and preserved workspace backups.
-- CLI diagnostics, inspection, portable snapshot commands, and public identity output.
-- Removal of central-server, Daytona, LLM summary, deployment, and automatic `.env` requirements.
-- Four-platform binary packaging and a standalone local handoff demo.
+| Review item | Implemented behavior | Evidence |
+| --- | --- | --- |
+| 1 | Canonical root aliases on macOS; project-internal symlink checks remain. | fsx path tests and macOS CI. |
+| 2 | Kernel flock, SIGINT/SIGTERM context cancellation, private leased temporary storage and cleanup. | fsx process tests, main process tests, `scripts/sigint-e2e.py`. |
+| 3 | In-place Git application preserves local config, hooks, tracking, remotes, reflogs, and stashes. | restore and syncer preservation regressions. |
+| 4 | Unmanaged files stay in place; bounded Git object backups with list/prune/undo. | inode regressions and `scripts/benchmark.py`. |
+| 5 | Truncated tail warns; malformed complete records exclude only that session. | session and integrated handoff regressions. |
+| 6 | Divergent sessions are preserved separately; newer local histories are retained. | keep-both/theirs/skip adapter regressions. |
+| 7 | Narrow secret patterns and explicit excluded-file output. | capture false-positive regression and CLI preview tests. |
+| 8 | Shared agent-home imports preserve the source. | same-home adapter and local handoff tests. |
+| 9 | Claude directories derive from mapped CWD, including subdirectories and long paths. | adapter tests and verified CLI fixture. |
+| 10 | Session staging stays in private temporary storage and is removed after import. | syncer plaintext-cleanup assertions and lifecycle E2E. |
+| 11 | Token-level path substitution preserves other JSONL bytes. | byte-exact adapter tests and genuine native fixtures. |
+| 12 | Pending exports support offline return ancestry, bounded retention, and TTL. | offline roundtrip and pending-state tests. |
+| 13 | Exact apply replay is idempotent; authenticated recipient state recovers lost receipts. | replay and reconciliation regressions. |
+| 14 | Negotiated incremental bundles; Git history has a separate size budget. | incremental capture tests and full benchmark. |
+| 15 | Mutual pairing and locally pinned sender lookup. | unpaired apply and key-substitution CLI tests. |
+| 16 | Go module matches `github.com/peerproblem/onthego`. | module build/install validation. |
+| 17 | WIP Git ancestry replaces transitive snapshot ID lists. | bounded-manifest multi-device rotation tests. |
+| 18 | JSON results and errors share stable structured fields. | main JSON-error tests and peer protocol tests. |
+| 19 | Capture avoids redundant outer fingerprints; session metadata/hash cache avoids repeated full reads. | cache invalidation tests and benchmark measurements. |
 
-## Validation
+## Structural changes
 
-Completed checks for the 0.2 implementation:
+- Git WIP trees preserve staged and unstaged content; existing repositories are updated in place.
+- Per-peer receipts and active-device guidance support multiple devices.
+- Device identity and project path mappings are separate.
+- `peer hello` negotiates protocol version and required capabilities.
+- The CLI has command-specific modules, phase progress, and session selection controls.
+- Snapshot schema 2 removes obsolete cloud metadata and patch fields.
+- Shared filesystem helpers replace duplicate lock and path implementations.
+- CI exercises macOS and Linux. Release packaging produces four native binaries and the npm launcher.
 
-| Check | Result |
-| --- | --- |
-| `make check` | Formatting, Go vet, and full Go test suite passed. |
-| `go test -race ./...` | Full Go test suite passed with the race detector. |
-| `make build` and `./scripts/demo.sh` | Encrypted local-device push/pull passed; Git history, staged/unstaged changes, untracked files, selected ignored files, and destination-local `.env` preservation verified. |
-| Isolated real OpenSSH handoff | Pair, push, remote edit, and pull passed through an unprivileged loopback SSH server with pinned host keys, temporary credentials, and spaces/apostrophes in paths. Binary and selected ignored files were included. |
-| `make package` | macOS/Linux arm64/amd64 binaries cross-compiled; executable format and exact eight-file npm package allowlist validated. |
-| Local npm tarball install | Offline installation into a temporary prefix succeeded; installed Linux amd64 `onthego version` and `--help` worked. |
-| Shell, JavaScript, YAML, and diff checks | Demo shell syntax, launcher/verifier JavaScript syntax, workflow/project YAML parsing, and whitespace checks passed. |
+## Verification record
 
-Tests cover native session fixtures, project scoping, path remapping, encryption/signature verification, unsafe inputs, secret selection, conflicts, and workspace restoration. Cross-compilation does not establish runtime validation on macOS or Linux arm64. No package was published and no hosted infrastructure was contacted for these checks.
+Before changes, local macOS `make check` reproduced all 15 reported syncer failures due to `/var` symlink rejection.
 
-## Not delivered by this scope
+Local validation on macOS arm64 passed against implementation commit `74e5299` on 2026-10-16:
 
-- Continuous unattended two-way sync or automatic conflict merging.
-- Running process, terminal, or in-memory agent migration.
-- Global agent SQLite databases or authentication replication.
-- Native Cursor/Hermes resume adapters.
-- A published 0.2 release, package-manager registry upload, or changes to existing remote VPS deployments.
+- `make check`, including formatting, vet, and all package tests.
+- `go test -race ./...`.
+- The demo roundtrip and real OpenSSH pairing, push, remote edit, and pull.
+- SIGINT during capture: exit 130, successful retry, and no retained plaintext staging.
+- Four native platform builds and npm package allowlist/version verification.
 
-Real desktop/laptop SSH and actual installed Codex/Claude resume should be validated against the user's device and agent versions. Local fixture tests establish format and file-transfer behavior, not universal compatibility with all future agent releases.
+Native CLI compatibility evidence is maintained separately in [agent compatibility](agent-compatibility.md). The [CI workflow](https://github.com/peerproblem/onthego/actions/workflows/ci.yml) runs the expanded checks on macOS and Ubuntu. The [release workflow](https://github.com/peerproblem/onthego/actions/workflows/release.yml) repeats these gates for the release tag before publication. A configured matrix alone is not evidence of a successful run.
+
+## Performance baseline
+
+Measured with `onthego 0.3.0 (74e5299)` on macOS arm64. The full fixture contains 100,000 ignored files on each device, 1 GiB of random historical Git content removed from the active working tree, and 500 synthetic Codex transcripts of 4 KiB each. These are local-process transfers and one-run measurements; SSH transport and native resume are separate checks.
+
+| Transfer | Elapsed | Net allocated disk growth |
+| --- | ---: | ---: |
+| Initial push | 28.7752 s | 1,080,311,808 bytes |
+| Incremental push | 2.6628 s | 57,344 bytes |
+| Return pull | 3.4435 s | 65,536 bytes |
+
+All 200,000 ignored-file inodes and all four project/Git-directory inodes were preserved. The destination retained its local Git configuration and hook. All 500 sessions arrived. Source Git allocation increased by 86,016 bytes across the full run. The complete fixture used 2,994,552,832 allocated bytes before automatic removal. These results show bounded incremental growth for this fixture, not a universal speed guarantee.
+
+Reproduce with:
+
+```sh
+make build
+python3 scripts/benchmark.py --profile full --output /tmp/onthego-benchmark.json
+```
+
+## Review and release
+
+Implementation was separated into [runtime foundations](https://github.com/peerproblem/onthego/pull/1), [native session adapters](https://github.com/peerproblem/onthego/pull/2), and [Git handoff integration](https://github.com/peerproblem/onthego/pull/3). The release gate and documentation are reviewed separately. Publication evidence belongs to the tagged workflow and the [0.3.0 release](https://github.com/peerproblem/onthego/releases/tag/v0.3.0).
