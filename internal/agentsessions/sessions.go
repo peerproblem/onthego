@@ -11,12 +11,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf16"
+
+	"github.com/jbaehova/onthego/internal/fsx"
 )
 
 const (
@@ -31,27 +33,31 @@ type Roots struct {
 }
 
 type Session struct {
-	Agent     string `json:"agent"`
-	ID        string `json:"id"`
-	Path      string `json:"path"`
-	CWD       string `json:"cwd"`
-	SizeBytes int64  `json:"size_bytes"`
-	SHA256    string `json:"sha256"`
+	Agent      string `json:"agent"`
+	ID         string `json:"id"`
+	Path       string `json:"path"`
+	CWD        string `json:"cwd"`
+	SizeBytes  int64  `json:"size_bytes"`
+	SHA256     string `json:"sha256"`
+	LastActive string `json:"last_active,omitempty"`
 }
 
 type Manifest struct {
-	SchemaVersion int       `json:"schema_version"`
-	SourceRoot    string    `json:"source_root"`
-	Sessions      []Session `json:"sessions"`
-	Warnings      []string  `json:"warnings,omitempty"`
+	SchemaVersion int               `json:"schema_version"`
+	SourceRoot    string            `json:"source_root"`
+	SourceAliases map[string]string `json:"source_aliases,omitempty"`
+	Sessions      []Session         `json:"sessions"`
+	Warnings      []string          `json:"warnings,omitempty"`
 }
 
 type ImportResult struct {
-	Imported int       `json:"imported"`
-	Updated  int       `json:"updated"`
-	Skipped  int       `json:"skipped"`
-	Sessions []Session `json:"sessions,omitempty"`
-	Warnings []string  `json:"warnings,omitempty"`
+	Imported       int       `json:"imported"`
+	Updated        int       `json:"updated"`
+	Skipped        int       `json:"skipped"`
+	Conflicts      int       `json:"conflicts"`
+	PreservedPaths []string  `json:"preserved_paths,omitempty"`
+	Sessions       []Session `json:"sessions,omitempty"`
+	Warnings       []string  `json:"warnings,omitempty"`
 }
 
 func DefaultRoots() (Roots, error) {
@@ -76,122 +82,22 @@ var warnings = []string{
 	"Codex desktop sidebar state, SQLite databases, global history indexes, and agent settings are not transferred. Resume imported JSONL sessions with the agent CLI; compatibility depends on the installed agent version.",
 }
 
-type discovered struct {
-	session Session
-	data    []byte
-}
-
-// Discover lists only project-scoped Codex and Claude JSONL histories. A blank
-// agent home disables that adapter. It does not traverse symbolic links.
-func Discover(projectRoot string, roots Roots) ([]Session, error) {
-	files, err := discover(projectRoot, roots)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]Session, 0, len(files))
-	for _, file := range files {
-		result = append(result, file.session)
-	}
-	return result, nil
-}
-
-func discover(projectRoot string, roots Roots) ([]discovered, error) {
-	root, err := absolute(projectRoot)
-	if err != nil {
-		return nil, err
-	}
-	if root == string(filepath.Separator) {
-		return nil, errors.New("native session project root must not be the filesystem root")
-	}
-	var result []discovered
-	var total int64
-	for _, adapter := range []struct {
-		agent, home string
-		dirs        []string
-	}{
-		{"codex", roots.CodexHome, []string{"sessions", "archived_sessions"}},
-		{"claude", roots.ClaudeHome, []string{"projects"}},
-	} {
-		if adapter.home == "" {
-			continue
-		}
-		home, err := absolute(adapter.home)
-		if err != nil {
-			return nil, err
-		}
-		for _, dir := range adapter.dirs {
-			base := filepath.Join(home, dir)
-			if err := noSymlinks(home, dir); err != nil {
-				return nil, err
-			}
-			err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
-				if walkErr != nil {
-					if os.IsNotExist(walkErr) {
-						return nil
-					}
-					return walkErr
-				}
-				if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || filepath.Ext(entry.Name()) != ".jsonl" {
-					return nil
-				}
-				if !entry.Type().IsRegular() {
-					return nil
-				}
-				_, candidateCWD, err := firstMetadata(path, adapter.agent)
-				if err != nil {
-					return err
-				}
-				if !within(candidateCWD, root) {
-					return nil
-				}
-				data, err := readStable(path, MaxSessionBytes)
-				if err != nil {
-					return err
-				}
-				id, cwd, err := metadata(data, adapter.agent)
-				if err != nil {
-					return fmt.Errorf("%s: %w", path, err)
-				}
-				if cwd != candidateCWD {
-					return errors.New("native session metadata changed during discovery")
-				}
-				rel, err := filepath.Rel(home, path)
-				if err != nil {
-					return err
-				}
-				if err := validatePath(adapter.agent, filepath.ToSlash(rel)); err != nil {
-					return err
-				}
-				total += int64(len(data))
-				if total > MaxBundleBytes {
-					return errors.New("native session bundle exceeds 1 GiB")
-				}
-				result = append(result, discovered{Session{Agent: adapter.agent, ID: id, CWD: cwd, Path: filepath.ToSlash(rel), SizeBytes: int64(len(data)), SHA256: digest(data)}, data})
-				return nil
-			})
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].session.Agent+result[i].session.Path < result[j].session.Agent+result[j].session.Path
-	})
-	return result, nil
-}
-
 // Export writes a portable manifest and full native logs to a new directory.
 // The caller must transport this sensitive directory over an encrypted channel.
 func Export(projectRoot, bundleDir string, roots Roots) (Manifest, error) {
-	root, err := absolute(projectRoot)
+	return ExportWithOptions(projectRoot, bundleDir, roots, Selection{})
+}
+
+func ExportWithOptions(projectRoot, bundleDir string, roots Roots, selection Selection) (Manifest, error) {
+	root, err := fsx.Canonical(projectRoot)
 	if err != nil {
 		return Manifest{}, err
 	}
-	files, err := discover(root, roots)
+	files, discoveryWarnings, err := discover(root, roots, selection, true)
 	if err != nil {
 		return Manifest{}, err
 	}
-	manifest := Manifest{SchemaVersion: SchemaVersion, SourceRoot: root, Sessions: []Session{}, Warnings: append([]string(nil), warnings...)}
+	manifest := Manifest{SchemaVersion: SchemaVersion, SourceRoot: root, SourceAliases: map[string]string{}, Sessions: []Session{}, Warnings: append(append([]string(nil), warnings...), discoveryWarnings...)}
 	if _, err := os.Lstat(bundleDir); err == nil {
 		return Manifest{}, errors.New("native session export directory already exists")
 	} else if !os.IsNotExist(err) {
@@ -206,6 +112,7 @@ func Export(projectRoot, bundleDir string, roots Roots) (Manifest, error) {
 	}
 	defer os.RemoveAll(staging)
 	for _, file := range files {
+		collectAliases(file.data, root, manifest.SourceAliases)
 		manifest.Sessions = append(manifest.Sessions, file.session)
 		target := filepath.Join(staging, file.session.Agent, filepath.FromSlash(file.session.Path))
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
@@ -237,12 +144,22 @@ type writePlan struct {
 // ValidateImport checks every hash, path, and destination collision without
 // modifying the destination. Import repeats these checks under its own lock.
 func ValidateImport(bundleDir, projectRoot string, roots Roots) (ImportResult, error) {
-	_, result, err := planImport(bundleDir, projectRoot, roots)
+	return ValidateImportWithOptions(bundleDir, projectRoot, roots, ImportOptions{})
+}
+
+func ValidateImportWithOptions(bundleDir, projectRoot string, roots Roots, options ImportOptions) (ImportResult, error) {
+	_, result, err := planImport(bundleDir, projectRoot, roots, options)
 	return result, err
 }
 
-func planImport(bundleDir, projectRoot string, roots Roots) ([]writePlan, ImportResult, error) {
-	root, err := absolute(projectRoot)
+func planImport(bundleDir, projectRoot string, roots Roots, options ImportOptions) ([]writePlan, ImportResult, error) {
+	if options.ConflictPolicy == "" {
+		options.ConflictPolicy = "keep-both"
+	}
+	if options.ConflictPolicy != "skip" && options.ConflictPolicy != "theirs" && options.ConflictPolicy != "keep-both" {
+		return nil, ImportResult{}, errors.New("session conflict policy must be skip, theirs, or keep-both")
+	}
+	root, err := fsx.Canonical(projectRoot)
 	if err != nil {
 		return nil, ImportResult{}, err
 	}
@@ -260,15 +177,31 @@ func planImport(bundleDir, projectRoot string, roots Roots) ([]writePlan, Import
 	if manifest.SchemaVersion != SchemaVersion || !filepath.IsAbs(manifest.SourceRoot) || filepath.Clean(manifest.SourceRoot) != manifest.SourceRoot || manifest.SourceRoot == string(filepath.Separator) {
 		return nil, ImportResult{}, errors.New("invalid native session manifest")
 	}
+	if err := validateAliases(manifest.SourceAliases, manifest.SourceRoot); err != nil {
+		return nil, ImportResult{}, err
+	}
 	result := ImportResult{Warnings: append([]string(nil), warnings...)}
+	for _, warning := range manifest.Warnings {
+		duplicate := false
+		for _, existing := range result.Warnings {
+			if existing == warning {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			result.Warnings = append(result.Warnings, warning)
+		}
+	}
 	var plans []writePlan
 	seen := map[string]bool{}
+	archives := map[string]bool{}
 	var total int64
 	for _, session := range manifest.Sessions {
 		if err := validatePath(session.Agent, session.Path); err != nil {
 			return nil, result, err
 		}
-		if !within(session.CWD, manifest.SourceRoot) {
+		if !within(aliasPath(session.CWD, manifest.SourceAliases), manifest.SourceRoot) {
 			return nil, result, errors.New("native session manifest contains unrelated project")
 		}
 		source := filepath.Join(session.Agent, filepath.FromSlash(session.Path))
@@ -290,7 +223,7 @@ func planImport(bundleDir, projectRoot string, roots Roots) ([]writePlan, Import
 		if err != nil || id != session.ID || cwd != session.CWD {
 			return nil, result, errors.New("native session metadata does not match manifest")
 		}
-		incoming, err := rewrite(original, manifest.SourceRoot, root)
+		incoming, err := rewriteAliases(original, manifest.SourceRoot, root, manifest.SourceAliases)
 		if err != nil {
 			return nil, result, err
 		}
@@ -298,7 +231,7 @@ func planImport(bundleDir, projectRoot string, roots Roots) ([]writePlan, Import
 		if session.Agent == "claude" {
 			home = roots.ClaudeHome
 			parts := strings.Split(session.Path, "/")
-			relative = "projects/" + ProjectDirectory(root) + "/" + strings.Join(parts[2:], "/")
+			relative = "projects/" + ProjectDirectory(remap(aliasPath(session.CWD, manifest.SourceAliases), manifest.SourceRoot, root)) + "/" + strings.Join(parts[2:], "/")
 		}
 		if home == "" {
 			return nil, result, fmt.Errorf("%s home is required to import captured sessions", session.Agent)
@@ -320,24 +253,59 @@ func planImport(bundleDir, projectRoot string, roots Roots) ([]writePlan, Import
 		if err != nil && !os.IsNotExist(err) {
 			return nil, result, err
 		}
-		if exists {
-			normalized, err := rewrite(previous, root, root)
-			if err != nil {
-				return nil, result, fmt.Errorf("existing native session is invalid: %s: %w", key, err)
+		// A local-path handoff can use the very same global agent home. Never
+		// rewrite the original history to point at a second workspace.
+		originalPath := filepath.Join(home, filepath.FromSlash(session.Path))
+		if manifest.SourceRoot != root {
+			if err := noSymlinks(home, session.Path); err != nil {
+				return nil, result, err
 			}
-			if bytes.Equal(normalized, incoming) {
+			if originalLocal, readErr := readStable(originalPath, MaxSessionBytes); readErr == nil && bytes.HasPrefix(originalLocal, original) {
 				result.Skipped++
-			} else if bytes.HasPrefix(incoming, normalized) {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("Skipped %s session %s: source history is already in the same agent home; its workspace path was preserved.", session.Agent, session.ID))
+				continue
+			}
+		}
+		if exists {
+			if bytes.Equal(previous, incoming) {
+				result.Skipped++
+			} else if bytes.HasPrefix(incoming, previous) {
 				result.Updated++
 				plans = append(plans, writePlan{home, relative, incoming, previous, true})
+			} else if bytes.HasPrefix(previous, incoming) {
+				result.Skipped++
+				result.Warnings = append(result.Warnings, fmt.Sprintf("Skipped %s session %s: destination has newer history.", session.Agent, session.ID))
 			} else {
-				return nil, result, fmt.Errorf("native session conflict at %s: destination is newer or diverged; preserve both histories and resolve before handoff", key)
+				result.Conflicts++
+				switch options.ConflictPolicy {
+				case "skip":
+					result.Skipped++
+					result.Warnings = append(result.Warnings, fmt.Sprintf("Skipped divergent %s session %s; destination history was preserved.", session.Agent, session.ID))
+				case "theirs":
+					result.Updated++
+					plans = append(plans, writePlan{home, relative, incoming, previous, true})
+					result.Warnings = append(result.Warnings, fmt.Sprintf("Replaced divergent %s session %s with incoming history (--sessions=theirs).", session.Agent, session.ID))
+				case "keep-both":
+					archive, archivePath, archiveErr := conflictPlan(options.ConflictsDir, session, incoming)
+					if archiveErr != nil {
+						return nil, result, archiveErr
+					}
+					if archive != nil && !archives[archivePath] {
+						plans = append(plans, *archive)
+					}
+					result.Skipped++
+					if !archives[archivePath] {
+						result.PreservedPaths = append(result.PreservedPaths, archivePath)
+					}
+					archives[archivePath] = true
+					result.Warnings = append(result.Warnings, fmt.Sprintf("Preserved divergent incoming %s session %s at %s; destination history was preserved.", session.Agent, session.ID, archivePath))
+				}
 			}
 		} else {
 			result.Imported++
 			plans = append(plans, writePlan{home, relative, incoming, nil, false})
 		}
-		session.CWD = remap(session.CWD, manifest.SourceRoot, root)
+		session.CWD = remap(aliasPath(session.CWD, manifest.SourceAliases), manifest.SourceRoot, root)
 		session.Path = relative
 		session.SHA256 = digest(incoming)
 		session.SizeBytes = int64(len(incoming))
@@ -348,8 +316,12 @@ func planImport(bundleDir, projectRoot string, roots Roots) ([]writePlan, Import
 
 // Import installs native logs without replacing unrelated sessions. Identical
 // histories are skipped and append-only incoming extensions are accepted. A
-// newer or divergent destination fails preflight before any history is written.
+// newer destination is skipped; divergence is archived unless options override it.
 func Import(bundleDir, projectRoot string, roots Roots) (ImportResult, error) {
+	return ImportWithOptions(bundleDir, projectRoot, roots, ImportOptions{})
+}
+
+func ImportWithOptions(bundleDir, projectRoot string, roots Roots, options ImportOptions) (ImportResult, error) {
 	// Lock both adapters in a stable order so simultaneous onthego imports cannot
 	// race. Native agents do not honor this lock and must be stopped by the user.
 	var homes []string
@@ -357,17 +329,20 @@ func Import(bundleDir, projectRoot string, roots Roots) (ImportResult, error) {
 		if home == "" {
 			continue
 		}
-		abs, err := absolute(home)
+		if err := noSymlinks(home, "."); err != nil {
+			return ImportResult{}, err
+		}
+		abs, err := fsx.Canonical(home)
 		if err != nil {
 			return ImportResult{}, err
 		}
 		homes = append(homes, abs)
 	}
 	sort.Strings(homes)
-	var locks []string
+	var locks []func()
 	defer func() {
 		for _, lock := range locks {
-			_ = os.Remove(lock)
+			lock()
 		}
 	}()
 	for i, home := range homes {
@@ -378,16 +353,13 @@ func Import(bundleDir, projectRoot string, roots Roots) (ImportResult, error) {
 			return ImportResult{}, err
 		}
 		path := filepath.Join(home, ".onthego-import.lock")
-		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		unlock, err := fsx.Lock(path)
 		if err != nil {
-			return ImportResult{}, fmt.Errorf("acquire native session import lock %s: %w", path, err)
-		}
-		locks = append(locks, path)
-		if err := file.Close(); err != nil {
 			return ImportResult{}, err
 		}
+		locks = append(locks, unlock)
 	}
-	plans, result, err := planImport(bundleDir, projectRoot, roots)
+	plans, result, err := planImport(bundleDir, projectRoot, roots, options)
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -482,10 +454,29 @@ func rollback(plans []writePlan) error {
 	return errors.Join(failures...)
 }
 
-// ProjectDirectory matches Claude Code's ordinary project-path encoding. Very
-// long-path encodings and future storage formats may require adapter updates.
+// ProjectDirectory matches the project encoding verified against Claude Code
+// 2.1.301. JavaScript measures strings in UTF-16 code units, including when
+// sanitizing non-BMP characters and hashing long project paths.
 func ProjectDirectory(root string) string {
-	return regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(filepath.Clean(root), "-")
+	units := utf16.Encode([]rune(filepath.Clean(root)))
+	sanitized := make([]byte, len(units))
+	var hash int32
+	for i, unit := range units {
+		if unit >= 'a' && unit <= 'z' || unit >= 'A' && unit <= 'Z' || unit >= '0' && unit <= '9' {
+			sanitized[i] = byte(unit)
+		} else {
+			sanitized[i] = '-'
+		}
+		hash = hash*31 + int32(unit)
+	}
+	if len(sanitized) <= 200 {
+		return string(sanitized)
+	}
+	positive := int64(hash)
+	if positive < 0 {
+		positive = -positive
+	}
+	return string(sanitized[:200]) + "-" + strconv.FormatInt(positive, 36)
 }
 
 // Read only enough metadata to scope the log before loading its full history.
@@ -525,14 +516,18 @@ func metadata(data []byte, agent string) (id, cwd string, err error) {
 				continue
 			}
 			var payload struct {
-				ID  string `json:"id"`
-				CWD string `json:"cwd"`
+				ID        string `json:"id"`
+				SessionID string `json:"session_id"`
+				CWD       string `json:"cwd"`
 			}
 			if err := json.Unmarshal(value["payload"], &payload); err != nil {
 				return id, cwd, err
 			}
 			if id == "" {
 				id, cwd = payload.ID, payload.CWD
+				if id == "" {
+					id = payload.SessionID
+				}
 			}
 		} else if id == "" {
 			var candidateID, candidateCWD string
@@ -549,58 +544,12 @@ func metadata(data []byte, agent string) (id, cwd string, err error) {
 	return id, cwd, nil
 }
 
-func rewrite(data []byte, source, target string) ([]byte, error) {
-	var output bytes.Buffer
-	for _, line := range bytes.Split(data, []byte{'\n'}) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		var value any
-		decoder := json.NewDecoder(bytes.NewReader(line))
-		decoder.UseNumber()
-		if err := decoder.Decode(&value); err != nil {
-			return nil, err
-		}
-		if err := decoder.Decode(new(any)); err != io.EOF {
-			return nil, errors.New("native JSONL contains trailing content")
-		}
-		value = rewriteValue(value, source, target, false)
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			return nil, err
-		}
-		output.Write(encoded)
-		output.WriteByte('\n')
-	}
-	return output.Bytes(), nil
-}
-
-var pathKeys = map[string]bool{
-	"cwd": true, "working_directory": true, "workdir": true,
-	"workspace": true, "workspace_path": true, "project_path": true,
-	"projectPath": true, "path": true, "file_path": true, "filePath": true,
-	"directory": true, "root": true, "writable_roots": true, "readable_roots": true,
-}
-
-func rewriteValue(value any, source, target string, pathValue bool) any {
-	switch typed := value.(type) {
-	case string:
-		if pathValue {
-			return remap(typed, source, target)
-		}
-	case []any:
-		for i := range typed {
-			typed[i] = rewriteValue(typed[i], source, target, pathValue)
-		}
-	case map[string]any:
-		for key, item := range typed {
-			typed[key] = rewriteValue(item, source, target, pathKeys[key])
-		}
-	}
-	return value
-}
-
 func remap(value, source, target string) string {
+	if filepath.IsAbs(value) && value != source && !strings.HasPrefix(value, source+string(filepath.Separator)) {
+		if canonical, err := fsx.Canonical(value); err == nil && (canonical == source || strings.HasPrefix(canonical, source+string(filepath.Separator))) {
+			value = canonical
+		}
+	}
 	if value == source {
 		return target
 	}
@@ -615,6 +564,14 @@ func within(path, root string) bool {
 		return false
 	}
 	rel, err := filepath.Rel(root, filepath.Clean(path))
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return true
+	}
+	canonical, err := fsx.Canonical(path)
+	if err != nil || canonical == path {
+		return false
+	}
+	rel, err = filepath.Rel(root, canonical)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
@@ -712,7 +669,7 @@ func readStable(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !os.SameFile(before, after) || before.Size() != int64(len(data)) || !before.ModTime().Equal(after.ModTime()) {
+	if !os.SameFile(before, after) || before.Size() != int64(len(data)) || !before.ModTime().Equal(after.ModTime()) || (changeTime(before) != nil && !unchanged(before, after)) {
 		return nil, errors.New("native session changed while reading; stop the agent before handoff")
 	}
 	return data, nil

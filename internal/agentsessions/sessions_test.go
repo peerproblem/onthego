@@ -10,7 +10,7 @@ import (
 )
 
 func TestNativeRoundTripPreservesHistoryAndRemapsPaths(t *testing.T) {
-	base := t.TempDir()
+	base := canonicalTestDir(t)
 	source := filepath.Join(base, "mini", "project.with_space")
 	target := filepath.Join(base, "laptop", "project")
 	roots := Roots{filepath.Join(base, "source-codex"), filepath.Join(base, "source-claude")}
@@ -99,7 +99,8 @@ func TestNativeRoundTripPreservesHistoryAndRemapsPaths(t *testing.T) {
 }
 
 func TestAppendOnlyUpdateAndConflictPreflight(t *testing.T) {
-	base := t.TempDir()
+	base := canonicalTestDir(t)
+	t.Setenv("ONTHEGO_HOME", filepath.Join(base, "onthego"))
 	source, target := filepath.Join(base, "source-project"), filepath.Join(base, "target-project")
 	roots := Roots{CodexHome: filepath.Join(base, "source-codex")}
 	destination := Roots{CodexHome: filepath.Join(base, "target-codex")}
@@ -126,8 +127,8 @@ func TestAppendOnlyUpdateAndConflictPreflight(t *testing.T) {
 	if !strings.Contains(readTest(t, filepath.Join(destination.CodexHome, path)), "second turn") {
 		t.Fatal("new turn missing")
 	}
-	if _, err := Import(first, target, destination); err == nil || !strings.Contains(err.Error(), "newer or diverged") {
-		t.Fatalf("older import must conflict, got %v", err)
+	if result, err := Import(first, target, destination); err != nil || result.Skipped != 1 || result.Conflicts != 0 {
+		t.Fatalf("older import must skip, got %#v, %v", result, err)
 	}
 
 	// Put a would-be new file first in lexical order, then a divergent log.
@@ -138,11 +139,19 @@ func TestAppendOnlyUpdateAndConflictPreflight(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := readTest(t, filepath.Join(destination.CodexHome, path))
-	if _, err := Import(third, target, destination); err == nil {
-		t.Fatal("divergent history was overwritten")
+	if result, err := Import(third, target, destination); err != nil || result.Conflicts != 1 || result.Imported != 1 || len(result.PreservedPaths) != 1 {
+		t.Fatalf("divergence should be archived while importing unrelated history: %#v, %v", result, err)
+	} else {
+		info, err := os.Stat(result.PreservedPaths[0])
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("conflict permissions: %v %v", info, err)
+		}
+		if !strings.Contains(readTest(t, result.PreservedPaths[0]), "divergence") {
+			t.Fatal("incoming conflict not archived")
+		}
 	}
-	if _, err := os.Stat(filepath.Join(destination.CodexHome, "sessions", "000-new.jsonl")); !os.IsNotExist(err) {
-		t.Fatal("conflict allowed partial import")
+	if _, err := os.Stat(filepath.Join(destination.CodexHome, "sessions", "000-new.jsonl")); err != nil {
+		t.Fatal("conflict blocked independent session import")
 	}
 	if readTest(t, filepath.Join(destination.CodexHome, path)) != before {
 		t.Fatal("conflict changed existing history")
@@ -152,7 +161,7 @@ func TestAppendOnlyUpdateAndConflictPreflight(t *testing.T) {
 func TestImportRejectsTamperingAndUnsafePaths(t *testing.T) {
 	for _, scenario := range []string{"hash", "escape", "symlink", "unrelated", "duplicate", "unknown-agent", "credential"} {
 		t.Run(scenario, func(t *testing.T) {
-			base := t.TempDir()
+			base := canonicalTestDir(t)
 			source, target := filepath.Join(base, "source"), filepath.Join(base, "target")
 			roots := Roots{CodexHome: filepath.Join(base, "codex")}
 			dest := Roots{CodexHome: filepath.Join(base, "target-codex")}
@@ -199,8 +208,8 @@ func TestImportRejectsTamperingAndUnsafePaths(t *testing.T) {
 	}
 }
 
-func TestDiscoveryRejectsIncompleteProjectLogAndSkipsSymlinks(t *testing.T) {
-	base := t.TempDir()
+func TestDiscoveryToleratesIncompleteProjectLogAndSkipsSymlinks(t *testing.T) {
+	base := canonicalTestDir(t)
 	project := filepath.Join(base, "project")
 	roots := Roots{CodexHome: filepath.Join(base, "codex")}
 	path := filepath.Join(roots.CodexHome, "sessions", "valid.jsonl")
@@ -215,13 +224,13 @@ func TestDiscoveryRejectsIncompleteProjectLogAndSkipsSymlinks(t *testing.T) {
 		t.Fatalf("discovered = %#v, %v", sessions, err)
 	}
 	writeTest(t, path, codexLog("valid", project)+`{"partial":`)
-	if _, err := Discover(project, roots); err == nil || !strings.Contains(err.Error(), "malformed") {
-		t.Fatalf("incomplete active log accepted: %v", err)
+	if result, err := DiscoverWithOptions(project, roots, Selection{}); err != nil || len(result.Sessions) != 1 || len(result.Warnings) != 1 {
+		t.Fatalf("incomplete active log should be trimmed with a warning: %#v, %v", result, err)
 	}
 }
 
 func TestUnrelatedOversizedLogDoesNotBlockProjectDiscovery(t *testing.T) {
-	base := t.TempDir()
+	base := canonicalTestDir(t)
 	project := filepath.Join(base, "project")
 	roots := Roots{CodexHome: filepath.Join(base, "codex")}
 	writeTest(t, filepath.Join(roots.CodexHome, "sessions", "valid.jsonl"), codexLog("valid", project))
@@ -237,7 +246,7 @@ func TestUnrelatedOversizedLogDoesNotBlockProjectDiscovery(t *testing.T) {
 }
 
 func TestOSAncestorSymlinkIsAllowedButAgentHomeSymlinkIsRejected(t *testing.T) {
-	base := t.TempDir()
+	base := canonicalTestDir(t)
 	real := filepath.Join(base, "real")
 	if err := os.Mkdir(real, 0o700); err != nil {
 		t.Fatal(err)
@@ -258,7 +267,7 @@ func TestOSAncestorSymlinkIsAllowedButAgentHomeSymlinkIsRejected(t *testing.T) {
 }
 
 func TestRollbackPreservesExistingBytesAndRemovesNewFiles(t *testing.T) {
-	base := t.TempDir()
+	base := canonicalTestDir(t)
 	previous := []byte("original history\n")
 	incoming := []byte("imported history\n")
 	plans := []writePlan{{home: base, relative: "sessions/a.jsonl", previous: previous, incoming: incoming, exists: true}, {home: base, relative: "sessions/b.jsonl", incoming: incoming}}
@@ -332,4 +341,13 @@ func readTest(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func canonicalTestDir(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
