@@ -1,13 +1,16 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/peerproblem/onthego/internal/otgerror"
 	"gopkg.in/yaml.v3"
 )
 
@@ -65,42 +68,83 @@ func FindRoot(start string) (string, error) {
 }
 
 func Load(root string) (Config, error) {
-	data, err := os.ReadFile(filepath.Join(root, FileName))
+	path := filepath.Join(root, FileName)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, err
 	}
+	cfg, err := Parse(data)
+	if err != nil {
+		return Config{}, policyError(path, err)
+	}
+	return cfg, nil
+}
+
+// Parse decodes and validates a project policy, migrating legacy cloud policies
+// without retaining their obsolete fields. Current policies reject unknown keys.
+func Parse(data []byte) (Config, error) {
+	var header struct {
+		SchemaVersion int `yaml:"schema_version"`
+	}
+	if err := yaml.Unmarshal(data, &header); err != nil {
+		return Config{}, otgerror.New(otgerror.CodeInput, "invalid project policy YAML: "+err.Error())
+	}
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return Config{}, fmt.Errorf("parse %s: %w", FileName, err)
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(header.SchemaVersion == SchemaVersion)
+	if err := decoder.Decode(&cfg); err != nil {
+		return Config{}, otgerror.New(otgerror.CodeInput, "invalid project policy YAML (allowed keys: schema_version, project_id, include, exclude, agent): "+err.Error())
 	}
-	if cfg.SchemaVersion != 1 && cfg.SchemaVersion != SchemaVersion {
-		return Config{}, fmt.Errorf("unsupported or incomplete %s", FileName)
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return Config{}, otgerror.New(otgerror.CodeInput, "project policy must contain one YAML document")
 	}
-	if err := ValidateProjectID(cfg.ProjectID); err != nil {
+	if cfg.SchemaVersion == 1 && cfg.Agent == "" {
+		cfg.Agent = "auto"
+	}
+	if err := Validate(cfg); err != nil {
 		return Config{}, err
 	}
 	// Old cloud settings are intentionally discarded. Personal devices belong in
 	// the user's private config, never in a shared project file.
 	cfg.SchemaVersion = SchemaVersion
-	if cfg.Agent == "" {
-		cfg.Agent = "auto"
-	}
 	return cfg, nil
 }
 
-func Save(root string, cfg Config) error {
-	if err := ValidateProjectID(cfg.ProjectID); err != nil {
-		return err
+// Validate checks policy values before they can affect workspace or session
+// selection. Only Parse and Save normalize a missing legacy agent to auto.
+func Validate(cfg Config) error {
+	if cfg.SchemaVersion != 1 && cfg.SchemaVersion != SchemaVersion {
+		return otgerror.New(otgerror.CodeInput, fmt.Sprintf("invalid schema_version %d; allowed values: 1, %d", cfg.SchemaVersion, SchemaVersion))
 	}
-	cfg.SchemaVersion = SchemaVersion
-	if cfg.Agent == "" {
+	if err := ValidateProjectID(cfg.ProjectID); err != nil {
+		return otgerror.New(otgerror.CodeInput, fmt.Sprintf("invalid project_id %q; allowed: 1-128 letters, numbers, dots, hyphens or underscores, except . and ..", cfg.ProjectID))
+	}
+	switch cfg.Agent {
+	case "auto", "codex", "claude", "none":
+		return nil
+	default:
+		return otgerror.New(otgerror.CodeInput, fmt.Sprintf("invalid agent %q; allowed values: auto, codex, claude, none", cfg.Agent))
+	}
+}
+
+func policyError(path string, err error) error {
+	return otgerror.Wrap(otgerror.CodeInput, fmt.Sprintf("invalid project policy %s: %s", path, otgerror.Public(err).Message), err)
+}
+
+func Save(root string, cfg Config) error {
+	path := filepath.Join(root, FileName)
+	if cfg.SchemaVersion == 1 && cfg.Agent == "" {
 		cfg.Agent = "auto"
 	}
+	if err := Validate(cfg); err != nil {
+		return policyError(path, err)
+	}
+	cfg.SchemaVersion = SchemaVersion
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(root, FileName)
 	tmp, err := os.CreateTemp(root, ".onthego.yaml-*")
 	if err != nil {
 		return err

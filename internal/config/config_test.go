@@ -1,12 +1,119 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/peerproblem/onthego/internal/otgerror"
 )
+
+func TestLoadRejectsInvalidProjectPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"agent", "schema_version: 2\nproject_id: project\nagent: typo\n", []string{"typo", "auto", "codex", "claude", "none"}},
+		{"missing agent", "schema_version: 2\nproject_id: project\n", []string{"agent", "auto", "codex", "claude", "none"}},
+		{"schema", "schema_version: 3\nproject_id: project\nagent: auto\n", []string{"schema_version", "3", "1", "2"}},
+		{"project ID", "schema_version: 2\nproject_id: ../escape\nagent: auto\n", []string{"project_id", "../escape", "letters"}},
+		{"unknown key", "schema_version: 2\nproject_id: project\nagent: auto\nagnt: codex\n", []string{"agnt", "allowed", "agent"}},
+		{"legacy cloud in current schema", "schema_version: 2\nproject_id: project\nagent: auto\ntargets: {old: {provider: cloud}}\n", []string{"targets", "allowed"}},
+		{"extra document", "schema_version: 2\nproject_id: project\nagent: auto\n---\nagent: codex\n", []string{"one YAML document"}},
+		{"invalid YAML", "schema_version: 2\nproject_id: project\nagent: [\n", []string{"YAML"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, FileName)
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(root)
+			var typed *otgerror.Error
+			if !errors.As(err, &typed) || typed.Code != otgerror.CodeInput {
+				t.Fatalf("Load() error = %v; want E_INPUT", err)
+			}
+			for _, want := range append(tc.want, path) {
+				if !strings.Contains(otgerror.Public(err).Message, want) {
+					t.Errorf("public message %q lacks %q", otgerror.Public(err).Message, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSaveRejectsInvalidPolicyWithoutChangingFile(t *testing.T) {
+	for _, mutate := range []func(*Config){
+		func(cfg *Config) { cfg.Agent = "typo" },
+		func(cfg *Config) { cfg.Agent = "" },
+		func(cfg *Config) { cfg.ProjectID = "../escape" },
+		func(cfg *Config) { cfg.SchemaVersion = 0 },
+		func(cfg *Config) { cfg.SchemaVersion = 3 },
+	} {
+		root := t.TempDir()
+		path := filepath.Join(root, FileName)
+		before := []byte("existing policy\n")
+		if err := os.WriteFile(path, before, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg := Default()
+		mutate(&cfg)
+		err := Save(root, cfg)
+		var typed *otgerror.Error
+		if !errors.As(err, &typed) || typed.Code != otgerror.CodeInput {
+			t.Errorf("Save(%+v) = %v; want E_INPUT", cfg, err)
+		} else if !strings.Contains(otgerror.Public(err).Message, path) {
+			t.Errorf("public error lacks policy path: %v", err)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil || string(after) != string(before) {
+			t.Errorf("invalid policy changed file: %q, %v", after, err)
+		}
+	}
+}
+
+func TestLegacyPolicyWithoutAgentDefaultsToAuto(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, FileName), []byte("schema_version: 1\nproject_id: legacy\nsummary: {kind: openai}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(root)
+	if err != nil || cfg.SchemaVersion != SchemaVersion || cfg.Agent != "auto" {
+		t.Fatalf("legacy policy = %+v, %v", cfg, err)
+	}
+}
+
+func TestAllowedAgentsRoundTripThroughSharedPolicyValidation(t *testing.T) {
+	for _, agent := range []string{"auto", "codex", "claude", "none"} {
+		t.Run(agent, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := Default()
+			cfg.Agent = agent
+			if err := Validate(cfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := Save(root, cfg); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := Load(root)
+			if err != nil || !reflect.DeepEqual(loaded, cfg) {
+				t.Fatalf("policy round trip = %+v, %v; want %+v", loaded, err, cfg)
+			}
+			data, err := os.ReadFile(filepath.Join(root, FileName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := Parse(data)
+			if err != nil || !reflect.DeepEqual(parsed, cfg) {
+				t.Fatalf("parsed policy = %+v, %v; want %+v", parsed, err, cfg)
+			}
+		})
+	}
+}
 
 func TestEnsureGitignorePreservesContentAndIsIdempotent(t *testing.T) {
 	root := t.TempDir()
