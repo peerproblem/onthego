@@ -22,6 +22,7 @@ func TestNamedEnvIsExcludedFromCapture(t *testing.T) {
 	git(t, root, "-c", "user.name=ONTHEGO Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "fixture")
 	mustWrite(t, filepath.Join(root, "vps.env"), []byte("PASSWORD=test-only\n"), 0o600)
 	mustWrite(t, filepath.Join(root, "notes.txt"), []byte("safe\n"), 0o644)
+	mustWrite(t, filepath.Join(root, ".claude", ".credentials.json"), []byte("authentication material"), 0o600)
 	cfg := config.Default()
 	cfg.Include = nil
 	files, err := capture.Preview(context.Background(), capture.Options{Root: root, Config: cfg})
@@ -34,6 +35,10 @@ func TestNamedEnvIsExcludedFromCapture(t *testing.T) {
 	_, err = capture.Preview(context.Background(), capture.Options{Root: root, Config: cfg, Include: []string{"vps.env"}})
 	if err == nil || !strings.Contains(err.Error(), "secret candidate") {
 		t.Fatalf("expected explicit include to require secret opt-in, got %v", err)
+	}
+	_, err = capture.Preview(context.Background(), capture.Options{Root: root, Config: cfg, IncludeSecret: []string{".claude/.credentials.json"}})
+	if err == nil {
+		t.Fatal("Claude authentication material must never be selected")
 	}
 }
 
@@ -51,6 +56,11 @@ func TestCaptureRestoreRoundTrip(t *testing.T) {
 	git(t, root, "config", "user.email", "test@example.invalid")
 	git(t, root, "add", ".gitignore", "tracked.txt", "deleted.txt")
 	git(t, root, "commit", "-m", "fixture")
+	git(t, root, "checkout", "-b", "feature/work")
+	git(t, root, "branch", "unpushed-work")
+	git(t, root, "tag", "local-tag")
+	git(t, root, "update-ref", "refs/stash", "HEAD")
+	git(t, root, "remote", "add", "origin", "https://private-token@example.invalid/owner/project.git?token=private")
 
 	mustWrite(t, filepath.Join(root, "tracked.txt"), []byte("staged\n"), 0o644)
 	git(t, root, "add", "tracked.txt")
@@ -80,12 +90,15 @@ func TestCaptureRestoreRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	packagePath := filepath.Join(base, "snapshot.otg")
-	result, err := capture.Create(ctx, capture.Options{Root: root, Config: cfg, Output: packagePath, ContextDir: contextDir, EnvironmentID: "local", OnthegoVersion: "test", Keys: keys})
+	result, err := capture.Create(ctx, capture.Options{Root: root, Config: cfg, Output: packagePath, ContextDir: contextDir, EnvironmentID: "local", OnthegoVersion: "test", Keys: keys, ParentSnapshotID: "previous", ParentSnapshotIDs: []string{"ancestor", "previous", ""}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Manifest.Agent.ContextEnvelopeID != "ctx-1" {
 		t.Fatalf("context envelope was not recorded: %#v", result.Manifest.Agent)
+	}
+	if strings.Join(result.Manifest.ParentSnapshotIDs, ",") != "ancestor,previous" {
+		t.Fatalf("snapshot ancestry was not preserved: %#v", result.Manifest.ParentSnapshotIDs)
 	}
 	ageIdentity, err := keys.Identity()
 	if err != nil {
@@ -94,6 +107,21 @@ func TestCaptureRestoreRoundTrip(t *testing.T) {
 	destination := filepath.Join(base, "restored")
 	if _, err := restore.Package(ctx, packagePath, destination, ageIdentity, keys.SigningPublic); err != nil {
 		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"symbolic-ref", "--short", "HEAD"}, {"show-ref"}} {
+		assertGitOutput(t, ctx, root, destination, args...)
+	}
+	origin, err := gitx.Run(ctx, destination, "remote", "get-url", "origin")
+	if err != nil || strings.TrimSpace(string(origin.Stdout)) != "https://example.invalid/owner/project.git" {
+		t.Fatalf("restored origin is not portable and credential-free: %s %v", origin.Stdout, err)
+	}
+	before, err := capture.Fingerprint(ctx, capture.Options{Root: root, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := capture.Fingerprint(ctx, capture.Options{Root: destination, Config: cfg})
+	if err != nil || before != after {
+		t.Fatalf("workspace fingerprint changed after roundtrip: %s %s %v", before, after, err)
 	}
 
 	assertGitOutput(t, ctx, root, destination, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv")
@@ -120,6 +148,94 @@ func TestCaptureRestoreRoundTrip(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(destination, ".onthego.local", "context", "HANDOFF.md")); err != nil {
 		t.Fatalf("context envelope missing after restore: %v", err)
+	}
+}
+
+func TestFingerprintDetectsUntrackedAndIgnoredChanges(t *testing.T) {
+	root := t.TempDir()
+	git(t, root, "init")
+	git(t, root, "-c", "user.name=ONTHEGO Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "fixture")
+	mustWrite(t, filepath.Join(root, ".gitignore"), []byte("local/\n"), 0o644)
+	mustWrite(t, filepath.Join(root, "local", "cache.txt"), []byte("original"), 0o644)
+	cfg := config.Default()
+	cfg.Include = []string{"local"}
+	options := capture.Options{Root: root, Config: cfg}
+	fingerprint := func() string {
+		t.Helper()
+		value, err := capture.Fingerprint(context.Background(), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	initial := fingerprint()
+	mustWrite(t, filepath.Join(root, "new.txt"), []byte("new work"), 0o644)
+	withNew := fingerprint()
+	if initial == withNew {
+		t.Fatal("new untracked file did not change fingerprint")
+	}
+	mustWrite(t, filepath.Join(root, "local", "cache.txt"), []byte("updated"), 0o644)
+	withIgnored := fingerprint()
+	if withNew == withIgnored {
+		t.Fatal("explicitly included ignored file did not change fingerprint")
+	}
+	mustWrite(t, filepath.Join(root, ".onthego.local", "context", "session.jsonl"), []byte("generated"), 0o600)
+	if withIgnored != fingerprint() {
+		t.Fatal("restored internal context changed workspace fingerprint")
+	}
+}
+
+func TestCaptureRejectsGitMetadataAndSymlinkAncestors(t *testing.T) {
+	root := t.TempDir()
+	git(t, root, "init")
+	git(t, root, "-c", "user.name=ONTHEGO Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "fixture")
+	outside := t.TempDir()
+	mustWrite(t, filepath.Join(outside, "notes.txt"), []byte("outside workspace"), 0o600)
+	if err := os.Symlink(outside, filepath.Join(root, "outside")); err != nil {
+		t.Fatal(err)
+	}
+	for _, include := range []string{".git/config", "outside/notes.txt"} {
+		t.Run(include, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Include = []string{include}
+			_, err := capture.Preview(context.Background(), capture.Options{Root: root, Config: cfg})
+			if err == nil {
+				t.Fatalf("unsafe include %s was accepted", include)
+			}
+		})
+	}
+}
+
+func TestDetachedRestoreHasNoTemporaryRemote(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("ONTHEGO_DATA_HOME", filepath.Join(base, "data"))
+	root := filepath.Join(base, "source")
+	mustMkdir(t, root)
+	git(t, root, "init")
+	git(t, root, "-c", "user.name=ONTHEGO Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "fixture")
+	git(t, root, "checkout", "--detach")
+	keys, err := identity.LoadOrCreate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	packagePath := filepath.Join(base, "snapshot.otg")
+	if _, err := capture.Create(context.Background(), capture.Options{Root: root, Config: config.Default(), Output: packagePath, Keys: keys}); err != nil {
+		t.Fatal(err)
+	}
+	ageIdentity, err := keys.Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(base, "restored")
+	if _, err := restore.Package(context.Background(), packagePath, destination, ageIdentity, keys.SigningPublic); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitx.Run(context.Background(), destination, "symbolic-ref", "HEAD"); err == nil {
+		t.Fatal("detached HEAD unexpectedly became a branch")
+	}
+	remotes, err := gitx.Run(context.Background(), destination, "remote")
+	if err != nil || len(remotes.Stdout) != 0 {
+		t.Fatalf("temporary bundle remote survived restore: %s %v", remotes.Stdout, err)
 	}
 }
 

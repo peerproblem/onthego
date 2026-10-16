@@ -1,11 +1,9 @@
-AGENTS.md
-.agents/
 .env
 .env.*
 *.env
 .onthego.local/
+.onthego-backup-*/
 *.otg
-HANDOFF.md
 dist/
 npm/vendor/
 node_modules/

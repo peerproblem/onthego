@@ -1,46 +1,43 @@
-# Phase 1 implementation record
+# 0.2 implementation record
 
-Updated 2026-09-19.
+Updated 2026-10-16.
 
-The replacement VPS follow-up is recorded separately in [VPS feedback validation](testing/2026-09-19-vps-feedback.md). Earlier live demo checks below describe the original environment; they should not be used as evidence for a different deployment. See the follow-up record for current-server verification and the [operations guide](contabo.md) for updates and certificate rotation.
+This implementation replaces the former hosted-service architecture with the explicit direct-device handoff described in [architecture.md](architecture.md). This document describes the current checkout; it does not claim that 0.2 has been published to npm or GitHub Releases.
 
-## Complete
+## Implemented
 
-- The public CLI exposes `init`, `login`, `pass`, `pull`, and `status`.
-- `onthego init` creates a stable project identity and safe default `agent-sync` configuration without overwriting an existing project.
-- Project commands refuse an uninitialized repository and direct the user to `onthego init`.
-- `onthego pass` automatically scans Codex, Cursor, Hermes, and Claude without agent or session options.
-- Every detected session for the current Git project is included while evidence from other workspaces is rejected.
-- Context export redacts tokens, authorization headers, common secret assignments, and private keys.
-- `HANDOFF.md` and the context envelope contain evidence hashes and source offsets.
-- The Daytona adapter uses the official Go SDK and uploads the installed static receiver binary.
-- A live Daytona CPU workload completed with a verified result hash.
-- `pull` validates the remote artifact hash before retaining the local file.
-- The Contabo control plane is deployed as a native systemd service with a dedicated user and TLS.
-- Live control plane login succeeds with certificate fingerprint pinning.
-- `status` refreshes redacted Daytona logs and synchronizes state through the control plane.
-- A live GPT-5.6 Luna request with reasoning effort `high` produced the status summary.
-- The root `.env` is permission `0600` and is the only repository location containing actual secret values.
-- Git ignores `AGENTS.md`, `.agents/`, `.env` files, local state, npm credentials, archives, build output, logs, and editor metadata.
-- `go test ./...` and `go vet ./...` pass.
+- Project schema 2 and personal `~/.onthego/` configuration.
+- Trusted SSH peers with pinned public encryption/signing identities.
+- Encrypted signed workspace snapshots and local-device transport for offline testing.
+- Git history, staged/unstaged changes, allowed untracked files, and selected ignored files.
+- Native project-scoped Codex/Claude session history and destination path mapping.
+- Conflict detection, explicit replacement, and preserved workspace backups.
+- CLI diagnostics, inspection, portable snapshot commands, and public identity output.
+- Removal of central-server, Daytona, LLM summary, deployment, and automatic `.env` requirements.
+- Four-platform binary packaging and a standalone local handoff demo.
 
-## Release readiness
+## Validation
 
-- GitHub Actions tests the project and builds Linux amd64 plus macOS arm64 binaries.
-- The public repository is `https://github.com/jbaehova/onthego`.
-- GitHub Actions run `35426890735` passed tests, vet, both platform builds, npm publishing, and GitHub Release creation on commit `15634ad`.
-- The workflow assembles and validates an npm package before publishing.
-- The installed npm binary dispatches to the correct bundled Go executable.
-- The desired unscoped package name `onthego` is already owned by another npm account. The prepared package is `@jbaehova/onthego` and still installs the `onthego` command.
-- The repository `NPM_TOKEN` secret is configured with a granular npm token that can publish from CI with two-factor authentication bypass enabled.
-- `@jbaehova/onthego@0.1.2` is published on npm with GitHub Actions provenance from commit `15634ad`.
-- A fresh public-registry install of `0.1.2` exposes exactly the five Phase 1 commands, and repeated `onthego init` preserves the same project ID.
-- GitHub Release `v0.1.2` contains the Linux amd64 and macOS arm64 binaries with matching checksum files.
-- The release workflow uploads each checksum from one artifact path so retrying a release cannot create duplicate asset uploads.
+Completed checks for the 0.2 implementation:
 
-## Backlog
+| Check | Result |
+| --- | --- |
+| `make check` | Formatting, Go vet, and full Go test suite passed. |
+| `go test -race ./...` | Full Go test suite passed with the race detector. |
+| `make build` and `./scripts/demo.sh` | Encrypted local-device push/pull passed; Git history, staged/unstaged changes, untracked files, selected ignored files, and destination-local `.env` preservation verified. |
+| Isolated real OpenSSH handoff | Pair, push, remote edit, and pull passed through an unprivileged loopback SSH server with pinned host keys, temporary credentials, and spaces/apostrophes in paths. Binary and selected ignored files were included. |
+| `make package` | macOS/Linux arm64/amd64 binaries cross-compiled; executable format and exact eight-file npm package allowlist validated. |
+| Local npm tarball install | Offline installation into a temporary prefix succeeded; installed Linux amd64 `onthego version` and `--help` worked. |
+| Shell, JavaScript, YAML, and diff checks | Demo shell syntax, launcher/verifier JavaScript syntax, workflow/project YAML parsing, and whitespace checks passed. |
 
-- GPU fine-tuning integration.
-- GPU model serving integration.
-- Hugging Face connector and immutable revision workflow.
-- Additional platform binaries beyond Linux amd64 and macOS arm64.
+Tests cover native session fixtures, project scoping, path remapping, encryption/signature verification, unsafe inputs, secret selection, conflicts, and workspace restoration. Cross-compilation does not establish runtime validation on macOS or Linux arm64. No package was published and no hosted infrastructure was contacted for these checks.
+
+## Not delivered by this scope
+
+- Continuous unattended two-way sync or automatic conflict merging.
+- Running process, terminal, or in-memory agent migration.
+- Global agent SQLite databases or authentication replication.
+- Native Cursor/Hermes resume adapters.
+- A published 0.2 release, package-manager registry upload, or changes to existing remote VPS deployments.
+
+Real desktop/laptop SSH and actual installed Codex/Claude resume should be validated against the user's device and agent versions. Local fixture tests establish format and file-transfer behavior, not universal compatibility with all future agent releases.

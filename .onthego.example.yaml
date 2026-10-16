@@ -1,33 +1,14 @@
-schema_version: 1
+schema_version: 2
 project_id: replace-with-generated-project-id
 include:
   - .onthego.yaml
-  - docs/**/*.md
 exclude:
   - .git
-  - .agents
+  - .onthego.local
   - node_modules
   - vendor
   - dist
   - build
+  - .cache
+  - __pycache__
 agent: auto
-summary:
-  kind: local
-targets:
-  daytona:
-    provider: daytona
-    receiver_path: /usr/local/bin/onthego
-secrets: {}
-workloads:
-  agent-sync:
-    kind: agent
-    image: debian:bookworm-slim
-    gpu_count: 0
-    argv:
-      - /bin/sh
-      - -lc
-      - cp ../context/HANDOFF.md ./HANDOFF.md
-    workdir: /workspace
-    output_path: HANDOFF.md
-    timeout_seconds: 600
-dnsimple: {}

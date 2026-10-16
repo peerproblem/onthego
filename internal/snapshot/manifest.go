@@ -24,6 +24,7 @@ type File struct {
 }
 
 type Git struct {
+	OriginURL        string `json:"origin_url,omitempty"`
 	BundleSHA256     string `json:"bundle_sha256"`
 	IndexPatchSHA256 string `json:"index_patch_sha256"`
 	WorkPatchSHA256  string `json:"worktree_patch_sha256"`

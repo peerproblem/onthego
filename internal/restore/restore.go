@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -24,7 +23,7 @@ type Result struct {
 }
 
 func Package(ctx context.Context, packagePath, output string, ageIdentity age.Identity, expectedSigner string) (Result, error) {
-	if _, err := os.Stat(output); err == nil {
+	if _, err := os.Lstat(output); err == nil {
 		return Result{}, otgerror.New(otgerror.CodeInput, "restore output already exists")
 	} else if !os.IsNotExist(err) {
 		return Result{}, err
@@ -48,9 +47,31 @@ func Package(ctx context.Context, packagePath, output string, ageIdentity age.Id
 	if _, err := gitx.Run(ctx, parent, command...); err != nil {
 		return Result{}, restoreError("clone bundled repository", err)
 	}
-	branch := "onthego/" + manifest.SnapshotID[:12]
-	if _, err := gitx.Run(ctx, root, "-c", "core.autocrlf=false", "checkout", "-b", branch, manifest.SourceGitHead); err != nil {
+	if _, err := gitx.Run(ctx, root, "remote", "remove", "origin"); err != nil {
+		return Result{}, restoreError("remove temporary bundle remote", err)
+	}
+	// Clone maps local branches to remote-tracking refs. Fetch the complete ref
+	// namespace back into place, including unpushed branches, tags and stashes.
+	if _, err := gitx.Run(ctx, root, "fetch", "--no-tags", "--update-head-ok", filepath.Join(extracted, "repo.bundle"), "+refs/*:refs/*"); err != nil {
+		return Result{}, restoreError("restore bundled Git refs", err)
+	}
+	checkout := []string{"-c", "core.autocrlf=false", "checkout", "--detach", manifest.SourceGitHead}
+	if manifest.SourceBranch != "" && manifest.SourceBranch != "(detached)" {
+		if _, err := gitx.Run(ctx, root, "check-ref-format", "--branch", manifest.SourceBranch); err != nil {
+			return Result{}, restoreError("snapshot branch is invalid", err)
+		}
+		checkout = []string{"-c", "core.autocrlf=false", "checkout", "-B", manifest.SourceBranch, manifest.SourceGitHead}
+	}
+	if _, err := gitx.Run(ctx, root, checkout...); err != nil {
 		return Result{}, restoreError("checkout snapshot HEAD", err)
+	}
+	if manifest.Git.OriginURL != "" {
+		if gitx.SafeOriginURL(manifest.Git.OriginURL) != manifest.Git.OriginURL {
+			return Result{}, restoreError("snapshot origin URL is not portable or contains credentials", nil)
+		}
+		if _, err := gitx.Run(ctx, root, "remote", "add", "origin", manifest.Git.OriginURL); err != nil {
+			return Result{}, restoreError("restore origin remote", err)
+		}
 	}
 	if err := applyPatch(ctx, root, filepath.Join(extracted, "index.patch"), true); err != nil {
 		return Result{}, err
@@ -65,6 +86,9 @@ func Package(ctx context.Context, packagePath, output string, ageIdentity age.Id
 	}
 	contextSource := filepath.Join(extracted, "context")
 	if info, err := os.Stat(contextSource); err == nil && info.IsDir() {
+		if err := packageotg.CheckParents(root, ".onthego.local/context/placeholder"); err != nil {
+			return Result{}, restoreError("context destination traverses a symlink", err)
+		}
 		if err := copyTree(contextSource, filepath.Join(root, ".onthego.local", "context")); err != nil {
 			return Result{}, err
 		}
@@ -98,9 +122,12 @@ func applyPatch(ctx context.Context, root, path string, index bool) error {
 }
 
 func restoreSelected(extracted, root string, file snapshot.File) error {
-	rel, err := safeRelative(file.RelativePath)
+	rel, err := packageotg.ProjectPath(file.RelativePath)
 	if err != nil {
 		return restoreError("manifest contains unsafe selected path", err)
+	}
+	if err := packageotg.CheckParents(root, rel); err != nil {
+		return restoreError("selected path traverses a symlink", err)
 	}
 	destination := filepath.Join(root, filepath.FromSlash(rel))
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
@@ -203,23 +230,16 @@ func copyRegular(source, destination string, mode fs.FileMode) error {
 	if err != nil {
 		return err
 	}
+	if err := output.Chmod(mode); err != nil {
+		output.Close()
+		return err
+	}
 	_, copyErr := io.Copy(output, input)
 	closeErr := output.Close()
 	if copyErr != nil {
 		return copyErr
 	}
 	return closeErr
-}
-
-func safeRelative(raw string) (string, error) {
-	if raw == "" || filepath.IsAbs(raw) {
-		return "", fmt.Errorf("invalid relative path")
-	}
-	clean := filepath.ToSlash(filepath.Clean(raw))
-	if clean != filepath.ToSlash(raw) || clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", fmt.Errorf("path escapes restore root")
-	}
-	return clean, nil
 }
 
 func hashFile(path string) (string, error) {

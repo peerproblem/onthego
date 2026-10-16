@@ -13,101 +13,33 @@ import (
 
 const FileName = ".onthego.yaml"
 
+const SchemaVersion = 2
+
 var gitignoreEntries = []string{
-	"AGENTS.md",
-	".agents/",
 	".env",
 	".env.*",
 	"*.env",
 	".onthego.local/",
 	"*.otg",
-	"HANDOFF.md",
-}
-
-type Target struct {
-	Provider      string `yaml:"provider" json:"provider"`
-	SandboxID     string `yaml:"sandbox_id,omitempty" json:"sandbox_id,omitempty"`
-	Image         string `yaml:"image,omitempty" json:"image,omitempty"`
-	ReceiverPath  string `yaml:"receiver_path,omitempty" json:"receiver_path,omitempty"`
-	AgeRecipient  string `yaml:"age_recipient,omitempty" json:"age_recipient,omitempty"`
-	SigningPublic string `yaml:"signing_public,omitempty" json:"signing_public,omitempty"`
-}
-
-type Summary struct {
-	Kind         string `yaml:"kind" json:"kind"`
-	Endpoint     string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
-	Model        string `yaml:"model,omitempty" json:"model,omitempty"`
-	DeploymentID string `yaml:"deployment_id,omitempty" json:"deployment_id,omitempty"`
-}
-
-type DNSimple struct {
-	Account string `yaml:"account,omitempty" json:"account,omitempty"`
-	Zone    string `yaml:"zone,omitempty" json:"zone,omitempty"`
-	BaseURL string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
-}
-
-type SecretBinding struct {
-	Name  string   `yaml:"name" json:"name"`
-	Hosts []string `yaml:"hosts,omitempty" json:"hosts,omitempty"`
-}
-
-type Workload struct {
-	Kind             string            `yaml:"kind" json:"kind"`
-	Image            string            `yaml:"image" json:"image"`
-	ImageDigest      string            `yaml:"image_digest,omitempty" json:"image_digest,omitempty"`
-	GPUCount         int               `yaml:"gpu_count" json:"gpu_count"`
-	GPUTypes         []string          `yaml:"gpu_types,omitempty" json:"gpu_types,omitempty"`
-	Argv             []string          `yaml:"argv" json:"argv"`
-	Workdir          string            `yaml:"workdir,omitempty" json:"workdir,omitempty"`
-	ModelRef         string            `yaml:"model_ref,omitempty" json:"model_ref,omitempty"`
-	DatasetRef       string            `yaml:"dataset_ref,omitempty" json:"dataset_ref,omitempty"`
-	OutputPath       string            `yaml:"output_path,omitempty" json:"output_path,omitempty"`
-	CheckpointPath   string            `yaml:"checkpoint_path,omitempty" json:"checkpoint_path,omitempty"`
-	HealthPath       string            `yaml:"health_path,omitempty" json:"health_path,omitempty"`
-	Port             int               `yaml:"port,omitempty" json:"port,omitempty"`
-	TimeoutSeconds   int               `yaml:"timeout_seconds,omitempty" json:"timeout_seconds,omitempty"`
-	SecretMappings   map[string]string `yaml:"secret_mappings,omitempty" json:"secret_mappings,omitempty"`
-	PublishAllowlist []string          `yaml:"publish_allowlist,omitempty" json:"publish_allowlist,omitempty"`
 }
 
 type Config struct {
-	SchemaVersion int                      `yaml:"schema_version" json:"schema_version"`
-	ProjectID     string                   `yaml:"project_id" json:"project_id"`
-	Include       []string                 `yaml:"include,omitempty" json:"include,omitempty"`
-	Exclude       []string                 `yaml:"exclude,omitempty" json:"exclude,omitempty"`
-	Agent         string                   `yaml:"agent" json:"agent"`
-	Summary       Summary                  `yaml:"summary" json:"summary"`
-	Targets       map[string]Target        `yaml:"targets,omitempty" json:"targets,omitempty"`
-	Secrets       map[string]SecretBinding `yaml:"secrets,omitempty" json:"secrets,omitempty"`
-	Workloads     map[string]Workload      `yaml:"workloads,omitempty" json:"workloads,omitempty"`
-	DNSimple      DNSimple                 `yaml:"dnsimple,omitempty" json:"dnsimple,omitempty"`
+	SchemaVersion int      `yaml:"schema_version" json:"schema_version"`
+	ProjectID     string   `yaml:"project_id" json:"project_id"`
+	Include       []string `yaml:"include,omitempty" json:"include,omitempty"`
+	Exclude       []string `yaml:"exclude,omitempty" json:"exclude,omitempty"`
+	Agent         string   `yaml:"agent" json:"agent"`
 }
 
 func Default() Config {
 	return Config{
-		SchemaVersion: 1,
+		SchemaVersion: SchemaVersion,
 		ProjectID:     uuid.NewString(),
 		Include:       []string{FileName},
 		Exclude: []string{
-			".git", "node_modules", "vendor", "dist", "build", ".cache", "__pycache__",
+			".git", ".onthego.local", "node_modules", "vendor", "dist", "build", ".cache", "__pycache__",
 		},
-		Agent:   "auto",
-		Summary: Summary{Kind: "local"},
-		Targets: map[string]Target{
-			"daytona": {Provider: "daytona", ReceiverPath: "/usr/local/bin/onthego"},
-		},
-		Secrets: map[string]SecretBinding{},
-		Workloads: map[string]Workload{
-			"agent-sync": {
-				Kind:           "agent",
-				Image:          "debian:bookworm-slim",
-				GPUCount:       0,
-				Argv:           []string{"/bin/sh", "-lc", "cp ../context/HANDOFF.md ./HANDOFF.md"},
-				Workdir:        "/workspace",
-				OutputPath:     "HANDOFF.md",
-				TimeoutSeconds: 600,
-			},
-		},
+		Agent: "auto",
 	}
 }
 
@@ -137,22 +69,29 @@ func Load(root string) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse %s: %w", FileName, err)
 	}
-	if cfg.SchemaVersion != 1 || cfg.ProjectID == "" {
+	if cfg.SchemaVersion != 1 && cfg.SchemaVersion != SchemaVersion {
 		return Config{}, fmt.Errorf("unsupported or incomplete %s", FileName)
 	}
-	if cfg.Targets == nil {
-		cfg.Targets = map[string]Target{}
+	if err := ValidateProjectID(cfg.ProjectID); err != nil {
+		return Config{}, err
 	}
-	if cfg.Secrets == nil {
-		cfg.Secrets = map[string]SecretBinding{}
-	}
-	if cfg.Workloads == nil {
-		cfg.Workloads = map[string]Workload{}
+	// Old cloud settings are intentionally discarded. Personal devices belong in
+	// the user's private config, never in a shared project file.
+	cfg.SchemaVersion = SchemaVersion
+	if cfg.Agent == "" {
+		cfg.Agent = "auto"
 	}
 	return cfg, nil
 }
 
 func Save(root string, cfg Config) error {
+	if err := ValidateProjectID(cfg.ProjectID); err != nil {
+		return err
+	}
+	cfg.SchemaVersion = SchemaVersion
+	if cfg.Agent == "" {
+		cfg.Agent = "auto"
+	}
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
@@ -260,14 +199,17 @@ func ValidateRelative(root, raw string) (string, error) {
 }
 
 func DataRoot() (string, error) {
+	if override := os.Getenv("ONTHEGO_HOME"); override != "" {
+		return filepath.Abs(override)
+	}
 	if override := os.Getenv("ONTHEGO_DATA_HOME"); override != "" {
 		return filepath.Abs(override)
 	}
-	root, err := os.UserConfigDir()
+	root, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(root, "onthego"), nil
+	return filepath.Join(root, ".onthego"), nil
 }
 
 func ProjectDataRoot(projectID string) (string, error) {
@@ -275,8 +217,20 @@ func ProjectDataRoot(projectID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if strings.ContainsAny(projectID, `/\\`) || projectID == "" {
-		return "", errors.New("invalid project ID")
+	if err := ValidateProjectID(projectID); err != nil {
+		return "", err
 	}
 	return filepath.Join(base, "projects", projectID), nil
+}
+
+func ValidateProjectID(projectID string) error {
+	if len(projectID) == 0 || len(projectID) > 128 || projectID == "." || projectID == ".." {
+		return errors.New("invalid project ID")
+	}
+	for _, ch := range projectID {
+		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '-' || ch == '_' || ch == '.') {
+			return errors.New("invalid project ID: use letters, numbers, dots, hyphens or underscores")
+		}
+	}
+	return nil
 }

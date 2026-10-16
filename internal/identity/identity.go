@@ -1,11 +1,13 @@
 package identity
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -25,20 +27,19 @@ func LoadOrCreate() (Keys, error) {
 	if err != nil {
 		return Keys{}, err
 	}
+	if err := config.EnsurePrivateDir(base); err != nil {
+		return Keys{}, err
+	}
 	dir := filepath.Join(base, "identity")
+	if err := config.EnsurePrivateDir(dir); err != nil {
+		return Keys{}, err
+	}
 	path := filepath.Join(dir, "keys.json")
-	data, err := os.ReadFile(path)
+	keys, err := loadExisting(path)
 	if err == nil {
-		var keys Keys
-		if err := json.Unmarshal(data, &keys); err != nil {
-			return Keys{}, fmt.Errorf("parse identity: %w", err)
-		}
 		return keys, nil
 	}
 	if !os.IsNotExist(err) {
-		return Keys{}, err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return Keys{}, err
 	}
 	ageID, err := age.GenerateX25519Identity()
@@ -49,13 +50,13 @@ func LoadOrCreate() (Keys, error) {
 	if err != nil {
 		return Keys{}, err
 	}
-	keys := Keys{
+	keys = Keys{
 		AgeIdentity:    ageID.String(),
 		AgeRecipient:   ageID.Recipient().String(),
 		SigningPrivate: base64.StdEncoding.EncodeToString(priv),
 		SigningPublic:  base64.StdEncoding.EncodeToString(pub),
 	}
-	data, err = json.MarshalIndent(keys, "", "  ")
+	data, err := json.MarshalIndent(keys, "", "  ")
 	if err != nil {
 		return Keys{}, err
 	}
@@ -80,10 +81,67 @@ func LoadOrCreate() (Keys, error) {
 	if err := tmp.Close(); err != nil {
 		return Keys{}, err
 	}
-	if err := os.Rename(name, path); err != nil {
+	// Link atomically without replacing another process's freshly created key.
+	// A replacement could invalidate peers that already pinned that identity.
+	if err := os.Link(name, path); os.IsExist(err) {
+		return loadExisting(path)
+	} else if err != nil {
 		return Keys{}, err
 	}
 	return keys, nil
+}
+
+func loadExisting(path string) (Keys, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return Keys{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return Keys{}, fmt.Errorf("identity must be a regular file: %s", path)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return Keys{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Keys{}, err
+	}
+	var keys Keys
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&keys); err != nil {
+		return Keys{}, fmt.Errorf("parse identity: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return Keys{}, fmt.Errorf("identity must contain one JSON object")
+	}
+	if err := keys.Validate(); err != nil {
+		return Keys{}, fmt.Errorf("invalid existing identity: %w", err)
+	}
+	return keys, nil
+}
+
+func (k Keys) Validate() error {
+	ageID, err := age.ParseX25519Identity(k.AgeIdentity)
+	if err != nil {
+		return fmt.Errorf("invalid age identity: %w", err)
+	}
+	if ageID.Recipient().String() != k.AgeRecipient {
+		return fmt.Errorf("age identity and recipient do not match")
+	}
+	priv, err := k.PrivateKey()
+	if err != nil {
+		return err
+	}
+	pub, err := ParsePublic(k.SigningPublic)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(priv.Public().(ed25519.PublicKey), pub) {
+		return fmt.Errorf("signing private and public keys do not match")
+	}
+	return nil
 }
 
 func (k Keys) Recipient() (age.Recipient, error) {
@@ -98,6 +156,9 @@ func (k Keys) PrivateKey() (ed25519.PrivateKey, error) {
 	b, err := base64.StdEncoding.DecodeString(k.SigningPrivate)
 	if err != nil || len(b) != ed25519.PrivateKeySize {
 		return nil, errorsJoin("invalid signing private key", err)
+	}
+	if !bytes.Equal(b, ed25519.NewKeyFromSeed(b[:ed25519.SeedSize])) {
+		return nil, fmt.Errorf("invalid signing private key: inconsistent public key")
 	}
 	return ed25519.PrivateKey(b), nil
 }

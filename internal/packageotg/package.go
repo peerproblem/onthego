@@ -48,12 +48,16 @@ func Create(payloadDir, output string, manifest snapshot.Manifest, recipient age
 	if err != nil {
 		return err
 	}
+	if err := checkPayloadLimits(payloadDir, int64(len(manifestJSON))+int64(base64.StdEncoding.EncodedLen(ed25519.SignatureSize))); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(output), ".onthego-package-*.tmp")
 	if err != nil {
 		return err
 	}
 	name := tmp.Name()
 	defer os.Remove(name)
+	defer tmp.Close()
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
 		return err
@@ -92,7 +96,8 @@ func Create(payloadDir, output string, manifest snapshot.Manifest, recipient age
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, output)
+	// Linking publishes the complete package without replacing an existing one.
+	return os.Link(name, output)
 }
 
 func Extract(packagePath, outputDir string, ageIdentity age.Identity, expectedSigner string) (snapshot.Manifest, error) {
@@ -114,6 +119,11 @@ func Extract(packagePath, outputDir string, ageIdentity age.Identity, expectedSi
 		return snapshot.Manifest{}, packageError("zstd stream is invalid", err)
 	}
 	defer zstdReader.Close()
+	if info, err := os.Lstat(outputDir); err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
+		return snapshot.Manifest{}, packageError("extraction root must be a real directory", nil)
+	} else if err != nil && !os.IsNotExist(err) {
+		return snapshot.Manifest{}, err
+	}
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return snapshot.Manifest{}, err
 	}
@@ -138,6 +148,9 @@ func Extract(packagePath, outputDir string, ageIdentity age.Identity, expectedSi
 			return snapshot.Manifest{}, packageError("archive contains an unsafe or duplicate path", err)
 		}
 		seen[name] = true
+		if err := CheckParents(outputDir, name); err != nil {
+			return snapshot.Manifest{}, packageError("archive path traverses a symlink", err)
+		}
 		total += header.Size
 		if total > MaxPayloadSize || (packageInfo.Size() > 0 && total > packageInfo.Size()*MaxRatio) {
 			return snapshot.Manifest{}, packageError("archive extraction limit exceeded", nil)
@@ -145,6 +158,9 @@ func Extract(packagePath, outputDir string, ageIdentity age.Identity, expectedSi
 		destination := filepath.Join(outputDir, filepath.FromSlash(name))
 		switch header.Typeflag {
 		case tar.TypeDir:
+			if info, err := os.Lstat(destination); err == nil && !info.IsDir() {
+				return snapshot.Manifest{}, packageError("archive directory conflicts with an existing file", nil)
+			}
 			if err := os.MkdirAll(destination, 0o700); err != nil {
 				return snapshot.Manifest{}, err
 			}
@@ -169,6 +185,9 @@ func Extract(packagePath, outputDir string, ageIdentity age.Identity, expectedSi
 				return snapshot.Manifest{}, closeErr
 			}
 		case tar.TypeSymlink:
+			if !strings.HasPrefix(name, "files/") {
+				return snapshot.Manifest{}, packageError("symlinks are allowed only in selected worktree files", nil)
+			}
 			link, err := safeLinkTarget(name, header.Linkname)
 			if err != nil {
 				return snapshot.Manifest{}, packageError("archive contains unsafe symlink", err)
@@ -199,6 +218,9 @@ func verifyExtracted(root, expectedSigner string) (snapshot.Manifest, error) {
 	}
 	if manifest.SchemaVersion != snapshot.SchemaVersion || manifest.ProjectID == "" {
 		return snapshot.Manifest{}, packageError("manifest schema is unsupported", nil)
+	}
+	if err := validateManifest(manifest); err != nil {
+		return snapshot.Manifest{}, packageError("manifest paths or payload metadata are invalid", err)
 	}
 	if err := manifest.ValidateID(); err != nil {
 		return snapshot.Manifest{}, packageError(err.Error(), err)
@@ -243,7 +265,120 @@ func verifyExtracted(root, expectedSigner string) (snapshot.Manifest, error) {
 			return snapshot.Manifest{}, err
 		}
 	}
+	// Every regular payload must be covered by the signed manifest. Otherwise an
+	// attacker could add context or executable files beside authenticated ones.
+	symlinks := map[string]bool{}
+	for _, file := range manifest.Files {
+		if file.Kind == "symlink" {
+			symlinks[file.ArchivePath] = true
+		}
+	}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if entry.Type()&os.ModeSymlink != 0 {
+			if !symlinks[rel] {
+				return fmt.Errorf("unsigned symlink: %s", rel)
+			}
+			return nil
+		}
+		if rel != "manifest.json" && rel != "manifest.sig" && manifest.PayloadHashes[rel] == "" {
+			return fmt.Errorf("unsigned payload: %s", rel)
+		}
+		return nil
+	}); err != nil {
+		return snapshot.Manifest{}, packageError("package contains unauthenticated payload", err)
+	}
 	return manifest, nil
+}
+
+func validateManifest(manifest snapshot.Manifest) error {
+	for path, hash := range map[string]string{
+		"repo.bundle":    manifest.Git.BundleSHA256,
+		"index.patch":    manifest.Git.IndexPatchSHA256,
+		"worktree.patch": manifest.Git.WorkPatchSHA256,
+	} {
+		if !validHash(hash) || manifest.PayloadHashes[path] != hash {
+			return fmt.Errorf("missing or inconsistent %s hash", path)
+		}
+	}
+	for path, hash := range manifest.PayloadHashes {
+		if _, err := safeArchivePath(path); err != nil || !validHash(hash) {
+			return fmt.Errorf("invalid payload path or hash: %s", path)
+		}
+	}
+	seen := map[string]bool{}
+	for _, file := range manifest.Files {
+		rel, err := ProjectPath(file.RelativePath)
+		if err != nil || seen[rel] {
+			return fmt.Errorf("unsafe or duplicate selected path: %s", file.RelativePath)
+		}
+		seen[rel] = true
+		if file.Kind == "tombstone" {
+			continue
+		}
+		if file.ArchivePath != "files/"+rel || !validHash(file.SHA256) {
+			return fmt.Errorf("invalid selected payload: %s", rel)
+		}
+		switch file.Kind {
+		case "file":
+			if manifest.PayloadHashes[file.ArchivePath] != file.SHA256 {
+				return fmt.Errorf("selected payload hash is inconsistent: %s", rel)
+			}
+		case "symlink":
+			if _, err := safeLinkTarget(rel, file.LinkTarget); err != nil {
+				return err
+			}
+			hash := sha256.Sum256([]byte(file.LinkTarget))
+			if hex.EncodeToString(hash[:]) != file.SHA256 {
+				return fmt.Errorf("selected symlink hash is inconsistent: %s", rel)
+			}
+		default:
+			return fmt.Errorf("unsupported selected file kind: %s", file.Kind)
+		}
+	}
+	return nil
+}
+
+func validHash(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func checkPayloadLimits(root string, manifestBytes int64) error {
+	total, count := manifestBytes, 2 // manifest.json and manifest.sig
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root {
+			return nil
+		}
+		count++
+		if count > MaxFiles {
+			return packageError("snapshot contains too many files; exclude generated directories", nil)
+		}
+		if entry.Type().IsRegular() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			total += info.Size()
+			if total > MaxPayloadSize {
+				return packageError("snapshot exceeds the 250 MiB expanded payload limit", nil)
+			}
+		}
+		return nil
+	})
 }
 
 func writeTree(writer *tar.Writer, root string) error {
@@ -331,14 +466,14 @@ func writeBytes(writer *tar.Writer, name string, data []byte, mode int64) error 
 func safeArchivePath(name string) (string, error) {
 	name = filepath.ToSlash(name)
 	clean := filepath.ToSlash(filepath.Clean(name))
-	if name == "" || name == "." || clean != name || strings.HasPrefix(name, "/") || name == ".." || strings.HasPrefix(name, "../") || strings.ContainsRune(name, '\x00') {
+	if name == "" || name == "." || clean != name || strings.HasPrefix(name, "/") || name == ".." || strings.HasPrefix(name, "../") || strings.ContainsAny(name, "\\\x00") || (len(name) > 1 && name[1] == ':') {
 		return "", errors.New("unsafe archive path")
 	}
 	return name, nil
 }
 
 func safeLinkTarget(entry, target string) (string, error) {
-	if filepath.IsAbs(target) || strings.ContainsRune(target, '\x00') {
+	if target == "" || filepath.IsAbs(target) || strings.ContainsAny(target, "\\\x00") || (len(target) > 1 && target[1] == ':') {
 		return "", errors.New("absolute symlink target")
 	}
 	resolved := filepath.Clean(filepath.Join(filepath.Dir(filepath.FromSlash(entry)), target))
@@ -352,6 +487,13 @@ func verifyFileHash(root, archivePath, expected string) error {
 	path, err := safeArchivePath(archivePath)
 	if err != nil {
 		return packageError("manifest contains unsafe payload path", err)
+	}
+	if err := CheckParents(root, path); err != nil {
+		return packageError("payload path traverses a symlink", err)
+	}
+	info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(path)))
+	if err != nil || !info.Mode().IsRegular() {
+		return packageError("payload is not a regular file", err)
 	}
 	file, err := os.Open(filepath.Join(root, filepath.FromSlash(path)))
 	if err != nil {

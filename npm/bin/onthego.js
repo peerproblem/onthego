@@ -6,7 +6,9 @@ const path = require("node:path");
 
 const supported = new Map([
   ["darwin-arm64", "onthego-darwin-arm64"],
+  ["darwin-x64", "onthego-darwin-amd64"],
   ["linux-x64", "onthego-linux-amd64"],
+  ["linux-arm64", "onthego-linux-arm64"],
 ]);
 
 const platform = `${process.platform}-${process.arch}`;

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -11,6 +12,31 @@ import (
 
 	"github.com/jbaehova/onthego/internal/otgerror"
 )
+
+// SafeOriginURL retains portable remotes while removing embedded credentials.
+// Local paths and Git's executable remote helpers are deliberately omitted.
+func SafeOriginURL(raw string) string {
+	if strings.ContainsAny(raw, "\r\n\x00") || strings.HasPrefix(raw, "-") {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http" && parsed.Scheme != "ssh" && parsed.Scheme != "git") {
+			return ""
+		}
+		if parsed.Scheme != "ssh" {
+			parsed.User = nil
+		} else if parsed.User != nil {
+			parsed.User = url.User(parsed.User.Username())
+		}
+		parsed.RawQuery, parsed.Fragment = "", ""
+		return parsed.String()
+	}
+	if colon := strings.IndexByte(raw, ':'); colon > 0 && colon < len(raw)-1 && !strings.ContainsAny(raw[:colon], "/\\ ") && !strings.Contains(raw, "::") {
+		return raw
+	}
+	return ""
+}
 
 type Result struct {
 	Stdout []byte
@@ -57,24 +83,44 @@ func Validate(ctx context.Context, root string) error {
 	if len(unmerged.Stdout) > 0 {
 		return otgerror.New(otgerror.CodeUnsupportedGit, "repositories with unmerged index entries are not supported")
 	}
+	flags, err := Run(short, root, "ls-files", "-v", "-z")
+	if err != nil {
+		return err
+	}
+	for _, entry := range bytes.Split(flags.Stdout, []byte{0}) {
+		if len(entry) > 0 && (entry[0] == 'S' || (entry[0] >= 'a' && entry[0] <= 'z')) {
+			return otgerror.New(otgerror.CodeUnsupportedGit, "clear assume-unchanged and skip-worktree index flags before synchronizing")
+		}
+	}
+	visible, err := Run(short, root, "diff", "--cached", "--raw", "-z", "--ita-visible-in-index")
+	if err != nil {
+		return err
+	}
+	invisible, err := Run(short, root, "diff", "--cached", "--raw", "-z", "--ita-invisible-in-index")
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(visible.Stdout, invisible.Stdout) {
+		return otgerror.New(otgerror.CodeUnsupportedGit, "stage or reset intent-to-add index entries before synchronizing")
+	}
 	if _, err := os.Stat(root + "/.gitmodules"); err == nil {
-		return otgerror.New(otgerror.CodeUnsupportedGit, "submodules are not supported in Phase 1")
+		return otgerror.New(otgerror.CodeUnsupportedGit, "submodule synchronization is not supported")
 	}
 	sparse, err := Run(short, root, "config", "--bool", "core.sparseCheckout")
 	if err == nil && strings.TrimSpace(string(sparse.Stdout)) == "true" {
-		return otgerror.New(otgerror.CodeUnsupportedGit, "sparse checkout is not supported in Phase 1")
+		return otgerror.New(otgerror.CodeUnsupportedGit, "sparse checkout synchronization is not supported")
 	}
 	partial, err := Run(short, root, "config", "--local", "--get-regexp", `^(extensions\.partialClone|remote\..*\.promisor)$`)
 	if err == nil && len(strings.TrimSpace(string(partial.Stdout))) > 0 {
-		return otgerror.New(otgerror.CodeUnsupportedGit, "partial clones are not supported in Phase 1")
+		return otgerror.New(otgerror.CodeUnsupportedGit, "partial clone synchronization is not supported")
 	}
 	filters, err := Run(short, root, "config", "--local", "--get-regexp", `^filter\.`)
 	if err == nil && len(strings.TrimSpace(string(filters.Stdout))) > 0 {
-		return otgerror.New(otgerror.CodeUnsupportedGit, "repository Git filters are not supported in Phase 1")
+		return otgerror.New(otgerror.CodeUnsupportedGit, "repositories with Git filters are not supported")
 	}
 	lfs, err := Run(short, root, "grep", "-I", "-n", "filter=lfs", "--", "*.gitattributes")
 	if err == nil && len(strings.TrimSpace(string(lfs.Stdout))) > 0 {
-		return otgerror.New(otgerror.CodeUnsupportedGit, "Git LFS is not supported in Phase 1")
+		return otgerror.New(otgerror.CodeUnsupportedGit, "Git LFS synchronization is not supported")
 	}
 	return nil
 }

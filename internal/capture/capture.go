@@ -19,7 +19,6 @@ import (
 
 	"filippo.io/age"
 	"github.com/jbaehova/onthego/internal/config"
-	"github.com/jbaehova/onthego/internal/contextenv"
 	"github.com/jbaehova/onthego/internal/gitx"
 	"github.com/jbaehova/onthego/internal/identity"
 	"github.com/jbaehova/onthego/internal/otgerror"
@@ -28,17 +27,18 @@ import (
 )
 
 type Options struct {
-	Root             string
-	Config           config.Config
-	Output           string
-	ContextDir       string
-	Include          []string
-	IncludeSecret    []string
-	ParentSnapshotID string
-	EnvironmentID    string
-	OnthegoVersion   string
-	Recipient        age.Recipient
-	Keys             identity.Keys
+	Root              string
+	Config            config.Config
+	Output            string
+	ContextDir        string
+	Include           []string
+	IncludeSecret     []string
+	ParentSnapshotID  string
+	ParentSnapshotIDs []string
+	EnvironmentID     string
+	OnthegoVersion    string
+	Recipient         age.Recipient
+	Keys              identity.Keys
 }
 
 type Result struct {
@@ -107,11 +107,11 @@ func Create(ctx context.Context, options Options) (Result, error) {
 	}
 	defer unlock()
 
-	selected, err := selectFiles(ctx, options)
+	before, err := Fingerprint(ctx, options)
 	if err != nil {
 		return Result{}, err
 	}
-	before, err := fingerprint(ctx, options.Root, selected)
+	selected, err := selectFiles(ctx, options)
 	if err != nil {
 		return Result{}, err
 	}
@@ -130,7 +130,7 @@ func Create(ctx context.Context, options Options) (Result, error) {
 		branch = "(detached)"
 	}
 	bundlePath := filepath.Join(payload, "repo.bundle")
-	if _, err := gitx.Run(ctx, options.Root, "bundle", "create", bundlePath, "HEAD"); err != nil {
+	if _, err := gitx.Run(ctx, options.Root, "bundle", "create", bundlePath, "--all", "HEAD"); err != nil {
 		return Result{}, err
 	}
 	indexPatch, err := gitx.Run(ctx, options.Root, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv")
@@ -161,11 +161,19 @@ func Create(ctx context.Context, options Options) (Result, error) {
 		},
 		SignerPublic: options.Keys.SigningPublic,
 	}
-	if options.ParentSnapshotID != "" {
-		manifest.ParentSnapshotIDs = []string{options.ParentSnapshotID}
+	parents := map[string]bool{}
+	for _, id := range append(append([]string(nil), options.ParentSnapshotIDs...), options.ParentSnapshotID) {
+		if id != "" && !parents[id] {
+			manifest.ParentSnapshotIDs = append(manifest.ParentSnapshotIDs, id)
+			parents[id] = true
+		}
 	}
+	sort.Strings(manifest.ParentSnapshotIDs)
 	manifest.Toolchain.GitVersion, _ = gitx.Version(ctx)
 	manifest.Git.Ref = branch
+	if origin, err := gitText(ctx, options.Root, "remote", "get-url", "origin"); err == nil {
+		manifest.Git.OriginURL = gitx.SafeOriginURL(origin)
+	}
 	for _, item := range []struct {
 		name string
 		path string
@@ -207,11 +215,11 @@ func Create(ctx context.Context, options Options) (Result, error) {
 	if err := manifest.SetSnapshotID(); err != nil {
 		return Result{}, err
 	}
-	after, err := fingerprint(ctx, options.Root, selected)
+	after, err := Fingerprint(ctx, options)
 	if err != nil {
 		return Result{}, err
 	}
-	if !bytes.Equal(before, after) {
+	if before != after {
 		return Result{}, &otgerror.Error{Code: otgerror.CodeSourceChanged, Message: "project changed while the snapshot was being captured", Retryable: true, Stage: "capture"}
 	}
 	if err := os.MkdirAll(filepath.Dir(options.Output), 0o700); err != nil {
@@ -273,6 +281,9 @@ func selectFiles(ctx context.Context, options Options) ([]selectedFile, error) {
 		if alwaysDenied(rel) {
 			return nil, otgerror.New(otgerror.CodeSecretPolicy, "authentication files and private keys cannot be included: "+rel)
 		}
+		if excluded(rel, options.Config.Exclude) {
+			return nil, otgerror.New(otgerror.CodeSecretPolicy, "secret path is excluded by project policy: "+rel)
+		}
 		if _, err := os.Lstat(filepath.Join(options.Root, filepath.FromSlash(rel))); err != nil {
 			return nil, err
 		}
@@ -280,6 +291,12 @@ func selectFiles(ctx context.Context, options Options) ([]selectedFile, error) {
 	}
 	result := make([]selectedFile, 0, len(chosen))
 	for _, file := range chosen {
+		if _, err := packageotg.ProjectPath(file.Relative); err != nil {
+			return nil, otgerror.Wrap(otgerror.CodeSecretPolicy, err.Error(), err)
+		}
+		if err := packageotg.CheckParents(options.Root, file.Relative); err != nil {
+			return nil, otgerror.Wrap(otgerror.CodeSecretPolicy, err.Error(), err)
+		}
 		result = append(result, file)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Relative < result[j].Relative })
@@ -293,6 +310,12 @@ func expand(root, raw string) ([]string, error) {
 	rel, err := config.ValidateRelative(root, raw)
 	if err != nil {
 		return nil, err
+	}
+	if _, err := packageotg.ProjectPath(rel); err != nil {
+		return nil, otgerror.Wrap(otgerror.CodeSecretPolicy, err.Error(), err)
+	}
+	if err := packageotg.CheckParents(root, rel); err != nil {
+		return nil, otgerror.Wrap(otgerror.CodeSecretPolicy, err.Error(), err)
 	}
 	matches, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(rel)))
 	if err != nil {
@@ -325,6 +348,9 @@ func expand(root, raw string) ([]string, error) {
 }
 
 func copySelected(root, payload string, selected selectedFile) (snapshot.File, error) {
+	if err := packageotg.CheckParents(root, selected.Relative); err != nil {
+		return snapshot.File{}, err
+	}
 	source := filepath.Join(root, filepath.FromSlash(selected.Relative))
 	info, err := os.Lstat(source)
 	if err != nil {
@@ -368,12 +394,12 @@ func copySelected(root, payload string, selected selectedFile) (snapshot.File, e
 		return snapshot.File{}, err
 	}
 	entry.Kind = "file"
-	entry.SHA256, entry.SizeBytes, err = hashRegular(source)
+	entry.SHA256, entry.SizeBytes, err = hashRegular(destination)
 	return entry, err
 }
 
 func copyContext(source, payload string, manifest *snapshot.Manifest) error {
-	info, err := os.Stat(source)
+	info, err := os.Lstat(source)
 	if err != nil || !info.IsDir() {
 		return otgerror.Wrap(otgerror.CodeSessionFormat, "context envelope directory is unavailable", err)
 	}
@@ -396,7 +422,7 @@ func copyContext(source, payload string, manifest *snapshot.Manifest) error {
 		if err := copyRegular(path, target, 0o600); err != nil {
 			return err
 		}
-		hash, _, err := hashRegular(path)
+		hash, _, err := hashRegular(target)
 		if err != nil {
 			return err
 		}
@@ -408,12 +434,37 @@ func copyContext(source, payload string, manifest *snapshot.Manifest) error {
 	}
 	data, err := os.ReadFile(filepath.Join(source, "context-envelope.json"))
 	if err == nil {
-		var envelope contextenv.Envelope
+		// Retain optional legacy archive metadata without the retired summary
+		// and agent-evidence collection subsystem.
+		var envelope struct {
+			ID           string `json:"id"`
+			AgentKind    string `json:"agent_kind"`
+			AgentVersion string `json:"agent_version"`
+			SessionID    string `json:"session_id"`
+		}
 		if json.Unmarshal(data, &envelope) == nil {
 			manifest.Agent = snapshot.Agent{Kind: envelope.AgentKind, Version: envelope.AgentVersion, SessionID: envelope.SessionID, ContextEnvelopeID: envelope.ID, ContextSHA256: hashBytes(data)}
 		}
 	}
 	return nil
+}
+
+// Fingerprint describes the current workspace without timestamps or generated
+// snapshot metadata. It includes selected ignored files and all Git refs, and
+// re-discovers untracked files on every call so additions cannot go unnoticed.
+func Fingerprint(ctx context.Context, options Options) (string, error) {
+	if err := gitx.Validate(ctx, options.Root); err != nil {
+		return "", err
+	}
+	selected, err := selectFiles(ctx, options)
+	if err != nil {
+		return "", err
+	}
+	data, err := fingerprint(ctx, options.Root, selected)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(data), nil
 }
 
 func fingerprint(ctx context.Context, root string, selected []selectedFile) ([]byte, error) {
@@ -430,29 +481,47 @@ func fingerprint(ctx context.Context, root string, selected []selectedFile) ([]b
 		return nil, err
 	}
 	hash := sha256.New()
-	io.WriteString(hash, head)
-	hash.Write(index.Stdout)
-	hash.Write(work.Stdout)
+	write := func(data []byte) {
+		fmt.Fprintf(hash, "%d:", len(data))
+		hash.Write(data)
+	}
+	write([]byte(head))
+	for _, args := range [][]string{{"for-each-ref", "--format=%(refname) %(objectname)"}, {"symbolic-ref", "--quiet", "HEAD"}} {
+		result, err := gitx.Run(ctx, root, args...)
+		if err != nil && args[0] != "symbolic-ref" {
+			return nil, err
+		}
+		write(result.Stdout)
+	}
+	write(index.Stdout)
+	write(work.Stdout)
 	for _, file := range selected {
-		io.WriteString(hash, file.Relative)
+		write([]byte(file.Relative))
 		path := filepath.Join(root, filepath.FromSlash(file.Relative))
 		info, err := os.Lstat(path)
 		if err != nil {
 			return nil, err
 		}
-		io.WriteString(hash, info.Mode().String())
+		mode := info.Mode()
+		if file.Secret && mode.IsRegular() {
+			mode = 0o600
+		}
+		write([]byte(mode.String()))
 		if info.Mode()&os.ModeSymlink != 0 {
 			target, err := os.Readlink(path)
 			if err != nil {
 				return nil, err
 			}
-			io.WriteString(hash, target)
+			write([]byte(target))
 		} else {
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("unsupported selected file type: %s", file.Relative)
+			}
 			fileHash, _, err := hashRegular(path)
 			if err != nil {
 				return nil, err
 			}
-			io.WriteString(hash, fileHash)
+			write([]byte(fileHash))
 		}
 	}
 	return hash.Sum(nil), nil
@@ -492,6 +561,10 @@ func copyRegular(source, destination string, mode fs.FileMode) error {
 	if err != nil {
 		return err
 	}
+	if err := output.Chmod(mode); err != nil {
+		output.Close()
+		return err
+	}
 	_, copyErr := io.Copy(output, input)
 	closeErr := output.Close()
 	if copyErr != nil {
@@ -517,6 +590,9 @@ func hashBytes(data []byte) string {
 }
 
 func excluded(path string, patterns []string) bool {
+	if path == ".onthego.local" || strings.HasPrefix(path, ".onthego.local/") || strings.HasSuffix(path, ".otg") {
+		return true
+	}
 	for _, pattern := range patterns {
 		clean := filepath.ToSlash(filepath.Clean(pattern))
 		if path == clean || strings.HasPrefix(path, strings.TrimSuffix(clean, "/")+"/") {
@@ -532,7 +608,7 @@ func excluded(path string, patterns []string) bool {
 func alwaysDenied(path string) bool {
 	lower := strings.ToLower(filepath.ToSlash(path))
 	base := strings.ToLower(filepath.Base(lower))
-	return strings.HasPrefix(lower, ".ssh/") || strings.Contains(lower, "/.ssh/") || base == "auth.json" || base == "credentials" || base == "credentials.json" || base == "id_rsa" || base == "id_ed25519" || strings.HasSuffix(base, ".key") || strings.Contains(base, "private_key")
+	return lower == ".git" || strings.HasPrefix(lower, ".git/") || strings.Contains(lower, "/.git/") || strings.HasPrefix(lower, ".ssh/") || strings.Contains(lower, "/.ssh/") || base == "auth.json" || base == "credentials" || base == "credentials.json" || base == ".credentials.json" || base == "id_rsa" || base == "id_ed25519" || strings.HasSuffix(base, ".key") || strings.Contains(base, "private_key")
 }
 
 func isSecretCandidate(path string) bool {

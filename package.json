@@ -1,15 +1,15 @@
 {
   "name": "@jbaehova/onthego",
-  "version": "0.1.3",
-  "description": "Carry agent context and work between local projects and Daytona sandboxes",
+  "version": "0.2.0",
+  "description": "Open-source workspace and coding-agent session handoffs between your own devices",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jbaehova/onthego.git"
+    "url": "git+https://github.com/peerproblem/onthego.git"
   },
-  "homepage": "https://github.com/jbaehova/onthego#readme",
+  "homepage": "https://github.com/peerproblem/onthego#readme",
   "bugs": {
-    "url": "https://github.com/jbaehova/onthego/issues"
+    "url": "https://github.com/peerproblem/onthego/issues"
   },
   "bin": {
     "onthego": "npm/bin/onthego.js"
@@ -17,6 +17,8 @@
   "files": [
     "npm/bin/onthego.js",
     "npm/vendor/onthego-darwin-arm64",
+    "npm/vendor/onthego-darwin-amd64",
+    "npm/vendor/onthego-linux-arm64",
     "npm/vendor/onthego-linux-amd64",
     "README.md",
     "LICENSE"

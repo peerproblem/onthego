@@ -7,34 +7,33 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.4"
-      - run: go test ./...
-      - run: go vet ./...
+          go-version-file: go.mod
+      - run: make check
+      - run: go test -race ./...
+      - run: make build
+      - run: ./scripts/demo.sh
 
   build:
     needs: test
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.4"
+          go-version-file: go.mod
       - name: Build CLI
         env:
           GOOS: ${{ matrix.goos }}
@@ -42,11 +41,12 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           mkdir -p dist
-          VERSION="${GITHUB_REF_NAME:-0.1.0-dev}"
+          VERSION="0.2.0-dev"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then VERSION="${GITHUB_REF_NAME}"; fi
           go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.builtAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o "dist/onthego-${GOOS}-${GOARCH}" ./cmd/onthego
           cd dist
           sha256sum "onthego-${GOOS}-${GOARCH}" > "onthego-${GOOS}-${GOARCH}.sha256"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: onthego-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
@@ -59,32 +59,26 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
       - name: Assemble npm package
         run: |
           mkdir -p npm/vendor
-          cp artifacts/onthego-linux-amd64/onthego-linux-amd64 npm/vendor/
-          cp artifacts/onthego-darwin-arm64/onthego-darwin-arm64 npm/vendor/
+          for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+            cp "artifacts/onthego-${platform}/onthego-${platform}" npm/vendor/
+          done
           chmod 0755 npm/bin/onthego.js npm/vendor/*
-          node -e "const fs=require('fs'); const p=require('./package.json'); p.version=process.env.GITHUB_REF_NAME.replace(/^v/, ''); fs.writeFileSync('package.json', JSON.stringify(p, null, 2)+'\\n')"
-      - name: Reject secret and local files
-        run: |
-          test ! -e .env.example
-          test ! -e Dockerfile
-          test ! -e .dockerignore
-          test -z "$(find . -path ./.git -prune -o \( -name '.env' -o -name 'AGENTS.md' -o -path '*/.agents/*' -o -name '*.otg' \) -print)"
+          node -e 'const fs = require("fs"); const p = require("./package.json"); p.version = process.env.GITHUB_REF_NAME.replace(/^v/, ""); fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n");'
       - run: npm pack --dry-run
       - run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/*/onthego-*
+          files: artifacts/*/onthego-*
