@@ -64,6 +64,14 @@ func TestMachineErrorSelection(t *testing.T) {
 	}
 }
 
+func TestTextErrorEscapesTerminalControls(t *testing.T) {
+	var output bytes.Buffer
+	writeError(&output, errors.New("cannot read path\n\x1b[31msecret"), false)
+	if got := output.String(); strings.Contains(got, "\x1b") || strings.Count(got, "\n") != 1 || !strings.Contains(got, `\n`) {
+		t.Fatalf("terminal controls leaked into text error: %q", got)
+	}
+}
+
 func TestSignalCancellationCleansPrivateTempAndAllowsRetry(t *testing.T) {
 	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
 		t.Run(sig.String(), func(t *testing.T) {
@@ -142,9 +150,69 @@ func TestMainSignalHelperProcess(t *testing.T) {
 		}
 		fmt.Println(dir)
 		<-ctx.Done()
+		if os.Getenv("ONTHEGO_SIGNAL_STALL") == "1" {
+			// Keep cleanup deliberately stalled after the first cancellation. The
+			// caller must still be able to terminate us with the next signal.
+			time.Sleep(100 * time.Millisecond)
+			fmt.Println("canceled")
+			<-time.After(time.Minute)
+		}
 		return ctx.Err()
 	}, []string{"--json"}, os.Stderr)
 	os.Exit(code)
+}
+
+func TestSecondSignalRestoresDefaultTermination(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
+		t.Run(sig.String(), func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestMainSignalHelperProcess$")
+			cmd.Env = append(os.Environ(), "ONTHEGO_SIGNAL_HELPER=1", "ONTHEGO_SIGNAL_STALL=1", "ONTHEGO_HOME="+t.TempDir())
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = cmd.Process.Kill() })
+			lines := make(chan string, 2)
+			go func() {
+				scanner := bufio.NewScanner(stdout)
+				for scanner.Scan() {
+					lines <- scanner.Text()
+				}
+				close(lines)
+			}()
+			for _, expected := range []string{"ready", "canceled"} {
+				select {
+				case line := <-lines:
+					if line == "" || (expected == "canceled" && line != expected) {
+						t.Fatalf("unexpected helper state: %q", line)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatalf("helper never reached %s", expected)
+				}
+				if err := cmd.Process.Signal(sig); err != nil {
+					t.Fatal(err)
+				}
+			}
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			select {
+			case err := <-done:
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) {
+					t.Fatalf("second signal did not terminate helper: %v", err)
+				}
+				status, ok := exit.Sys().(syscall.WaitStatus)
+				if !ok || !status.Signaled() || status.Signal() != sig {
+					t.Fatalf("unexpected second-signal exit: %v", exit)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("second signal did not restore immediate default termination")
+			}
+		})
+	}
 }
 
 func TestSnapshotPackSignalCleansUpAndRetrySucceeds(t *testing.T) {

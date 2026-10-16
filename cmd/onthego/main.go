@@ -38,6 +38,12 @@ func run() int {
 func runCommand(execute func(context.Context) error, args []string, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		<-ctx.Done()
+		// The first signal requests cleanup; a second signal must retain the
+		// default immediate-termination behavior if cleanup is stuck.
+		stop()
+	}()
 	if home, err := config.DataRoot(); err == nil {
 		if err := fsx.CleanupTemps(home, 24*time.Hour); err != nil {
 			// Maintenance cannot make a healthy handoff fail. JSON and peer streams
@@ -52,7 +58,7 @@ func runCommand(execute func(context.Context) error, args []string, stderr io.Wr
 		return 0
 	}
 	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-		writeError(stderr, otgerror.New(otgerror.CodePrecondition, "handoff canceled"), machineErrors(args))
+		writeError(stderr, otgerror.New(otgerror.CodeCanceled, "handoff canceled"), machineErrors(args))
 		return 130
 	}
 	writeError(stderr, err, machineErrors(args))
@@ -64,7 +70,7 @@ func writeError(writer io.Writer, err error, machine bool) {
 		_ = json.NewEncoder(writer).Encode(otgerror.Public(err))
 		return
 	}
-	fmt.Fprintln(writer, err)
+	fmt.Fprintln(writer, otgerror.TerminalText(err.Error()))
 }
 
 func machineErrors(args []string) bool {
