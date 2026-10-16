@@ -9,12 +9,12 @@ No ONTHEGO account or central server is needed. SSH connects your devices. Insta
 ## Install
 
 ```sh
-npm install -g @jbaehova/onthego@^0.3.0
+npm install -g @jbaehova/onthego@^0.3.1
 ```
 
 The npm package includes binaries for macOS arm64/amd64 and Linux arm64/amd64. Git and OpenSSH are required. Node.js is needed only for the npm launcher. Install the same ONTHEGO version on both devices.
 
-You can also build from source with Go 1.25.4 or newer:
+You can also build from source with Go 1.26 or newer (the build selects Go 1.27.2):
 
 ```sh
 git clone https://github.com/peerproblem/onthego.git
@@ -91,12 +91,13 @@ The default selection is sessions active in the last seven days. Choose a narrow
 onthego push laptop --session <id>
 onthego push laptop --session-days 2
 onthego push laptop --all-sessions
-onthego pull laptop --sessions skip
+onthego pull laptop --no-sessions
+onthego pull laptop --session-conflict skip
 ```
 
-Malformed completed JSONL lines exclude that session with a warning. An incomplete final line is discarded with a warning. These histories do not stop the workspace handoff.
+Malformed completed JSONL lines exclude that session with a warning. An incomplete final line is discarded with a warning. These histories do not stop the workspace handoff. An explicitly requested ID that cannot be found fails before packaging. `--no-sessions` skips session discovery and leaves receiving agent homes untouched.
 
-Identical sessions are skipped. Incoming extensions update an older destination, while a newer destination is kept. Divergent sessions keep the destination and save the incoming history in private `~/.onthego/conflicts/` storage by default. `--sessions keep-both`, `--sessions theirs`, and `--sessions skip` make the policy explicit. Conflict copies remain until you review and remove them. Plaintext staging copies are removed after import. If an adapter cannot write its destination, the workspace still arrives and its authenticated inbound histories are retained in a private `session-recovery-*` directory under ONTHEGO state. The warning prints its location.
+Identical sessions are skipped. Incoming extensions update an older destination, while a newer destination is kept. Divergent sessions keep the destination and save the incoming history in private `~/.onthego/conflicts/` storage by default. `--session-conflict keep-both`, `--session-conflict theirs`, and `--session-conflict skip` make the policy explicit. Conflict copies remain until you review and remove them. Plaintext staging copies are removed after import. If an adapter cannot write its destination, the workspace still arrives and its authenticated inbound histories are retained in a private `session-recovery-*` directory under ONTHEGO state. The warning prints its location. `status` reports pending recovery. Retry the same package or run `onthego sessions recover --session-conflict keep-both` to import only the saved sessions while preserving subsequent workspace edits. JSON reports `sessions.status: "recovery_needed"` until recovery succeeds. The deprecated `--sessions` alias still works and warns; it only chooses a conflict policy.
 
 Concurrent workspace edits require a deliberate decision. ONTHEGO checks Git handoff ancestry and the destination's captured workspace state. `--replace` applies incoming managed files after retaining a Git backup; a different project ID is always rejected.
 
@@ -106,7 +107,7 @@ onthego undo
 onthego backups prune --keep 3
 ```
 
-The newest five Git backups are retained automatically. Explicitly included supplemental secrets stay outside Git objects; their backup contents are encrypted under the private ONTHEGO state directory. Unmanaged `node_modules`, caches, and local environment files are not copied into backups. Undo restores the backed-up managed state and clears the delivery baseline, since restoring old work does not prove that another device has received it. Use Git to reconcile intentional concurrent development.
+The newest five Git backups are retained automatically. Explicitly included supplemental secrets stay outside Git objects; their backup contents are encrypted under the private ONTHEGO state directory. Unmanaged `node_modules`, caches, and local environment files are not copied into backups. Undo restores the backed-up managed state and clears the delivery baseline, since restoring old work does not prove that another device has received it. Backup listing, pruning and undo remain available even if `.onthego.yaml` is missing or invalid. Use Git to reconcile intentional concurrent development.
 
 ## Configuration
 
@@ -141,7 +142,9 @@ onthego push laptop --include scratch/notes.txt
 onthego push laptop --include-secret .env
 ```
 
-Explicitly selected files remain managed across subsequent handoffs, including deletions. Do not opt in credentials that must stay device-local. Names such as `tokenizer.ts`, `docs-secret-santa.md`, and `design.key` are ordinary project files, not secret candidates.
+Explicitly selected files remain managed across subsequent handoffs, including deletions. Do not opt in credentials that must stay device-local. Adding a managed supplemental file to `exclude` stops future transfer and leaves the receiving copy in place with a warning. Source deletions still propagate. Project exclusions override previously remembered secret selections; explicitly combining an excluded path with `--include-secret` fails.
+
+Credential filenames such as `.npmrc` and `.netrc` are excluded from automatic selection. `--include-secret .npmrc` carries an allowed file in the encrypted supplemental payload, outside Git objects. Names such as `tokenizer.ts`, `docs-secret-santa.md`, and `design.key` are ordinary project files, not secret candidates.
 
 ## Portable snapshots
 
@@ -172,10 +175,28 @@ Offline exports retain pending receipts for up to 30 days, bounded to 64 per wor
 | `inspect` | Preview file selection and excluded secret candidates. |
 | `doctor [device]` | Check prerequisites, CLI versions, and optional peer access. |
 | `snapshot pack/restore` | Create or receive an offline package. |
+| `sessions recover` | Retry saved native histories without changing the workspace. |
 | `backups list/prune`, `undo` | Inspect, limit, or restore Git backups. |
 | `identity`, `config path`, `version` | Inspect public identity and installation. |
 
-`--json` emits structured results and errors. `--verbose` reports transfer phases on stderr.
+Text output escapes control characters in filenames and session IDs. Suggested commands for these unusual names use Bash/Zsh quoting. `--json` emits structured results and errors. `--verbose` reports transfer phases on stderr. Dry-run validates local options and previews files plus selected sessions. Its `not_checked` field lists `peer` and `destination_conflict`.
+
+| Exit status | Public error codes |
+| --- | --- |
+| 0 | Success, including delivered workspaces with pending session recovery |
+| 1 | `E_INTERNAL` |
+| 2 | `E_INPUT` |
+| 3 | `E_PRECONDITION`, `E_UNSUPPORTED_GIT`, `E_SECRET_POLICY`, `E_SESSION_FORMAT` |
+| 4 | `E_TARGET_AUTH`, `E_TARGET_UNAVAILABLE` |
+| 5 | `E_PACKAGE_INVALID`, `E_RESTORE_FAILED` |
+| 6 | `E_GENERATION_CONFLICT`, `E_SOURCE_CHANGED` |
+| 130 | `E_CANCELED` |
+
+## Upgrading to 0.3.1
+
+Upgrade both devices together. Snapshot schema 3 adds signed `retained_paths` and `payload_sizes`; 0.3.1 reads schema 2 and 3, while older receivers reject schema 3. Peer transfers require the `snapshot-v3` and `session-scope` capabilities. Project policy and handoff receipt schemas remain 2; session recovery uses a separate state file.
+
+If you transferred an untracked credential file such as `.npmrc` with 0.3.0 or earlier, rotate its tokens. Those bytes can remain in the source and receiving repositories' Git objects through retained WIP history. This update prevents new automatic capture but does not remove existing objects; Git garbage collection alone does not remove referenced history. See the [0.3.1 release notes](docs/releases/0.3.1.md).
 
 ## Development
 

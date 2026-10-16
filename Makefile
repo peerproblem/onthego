@@ -1,7 +1,7 @@
 BINARY := dist/onthego
 GO ?= go
 GOFMT ?= gofmt
-VERSION ?= 0.3.0
+VERSION ?= 0.3.1
 # npm, GitHub artifacts and --version use one canonical version without a tag prefix.
 BUILD_VERSION := $(patsubst v%,%,$(VERSION))
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
@@ -35,6 +35,7 @@ package:
 e2e: build
 	./scripts/ssh-e2e.sh
 	python3 scripts/sigint-e2e.py
+	python3 scripts/npm-signal-e2e.py
 
 benchmark: build
 	python3 scripts/benchmark.py

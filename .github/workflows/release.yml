@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GO_VERSION: "1.27.2"
+
 jobs:
   test:
     strategy:
@@ -16,11 +19,11 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: go.mod
-      - uses: actions/setup-node@v4
+          go-version: ${{ env.GO_VERSION }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - run: make check
@@ -28,6 +31,7 @@ jobs:
       - run: make build
       - run: ./scripts/demo.sh
       - run: python3 scripts/sigint-e2e.py
+      - run: python3 scripts/npm-signal-e2e.py
       - run: python3 scripts/benchmark.py --profile smoke
       - name: Install tested native agent versions
         run: npm install --prefix "$RUNNER_TEMP/agent-clis" @openai/codex@0.163.0 @anthropic-ai/claude-code@2.1.301 --no-audit --no-fund
@@ -46,17 +50,17 @@ jobs:
         goos: [linux, darwin]
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
       - name: Build CLI with canonical version
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          VERSION="0.3.0-dev"
+          VERSION="0.3.1-dev"
           if [ "${GITHUB_REF_TYPE}" = tag ]; then
             VERSION="${GITHUB_REF_NAME#v}"
             printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
@@ -64,7 +68,7 @@ jobs:
           make build VERSION="$VERSION" COMMIT="$GITHUB_SHA" BINARY="dist/onthego-${GOOS}-${GOARCH}"
           cd dist
           sha256sum "onthego-${GOOS}-${GOARCH}" > "onthego-${GOOS}-${GOARCH}.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: onthego-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
@@ -77,14 +81,21 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
+      - name: Locate release notes
+        id: release_notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES="docs/releases/${VERSION}.md"
+          test -s "$NOTES"
+          printf 'path=%s\n' "$NOTES" >> "$GITHUB_OUTPUT"
       - name: Assemble npm package
         run: |
           mkdir -p npm/vendor
@@ -109,7 +120,8 @@ jobs:
         run: node npm/scripts/deprecate-legacy.mjs
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           generate_release_notes: true
+          body_path: ${{ steps.release_notes.outputs.path }}
           files: artifacts/*/onthego-*
