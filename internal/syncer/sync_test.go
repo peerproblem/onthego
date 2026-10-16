@@ -8,11 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jbaehova/onthego/internal/capture"
-	"github.com/jbaehova/onthego/internal/config"
-	"github.com/jbaehova/onthego/internal/fsx"
-	"github.com/jbaehova/onthego/internal/gitx"
-	"github.com/jbaehova/onthego/internal/identity"
+	"github.com/peerproblem/onthego/internal/capture"
+	"github.com/peerproblem/onthego/internal/config"
+	"github.com/peerproblem/onthego/internal/fsx"
+	"github.com/peerproblem/onthego/internal/gitx"
+	"github.com/peerproblem/onthego/internal/identity"
+	"github.com/peerproblem/onthego/internal/restore"
 )
 
 type machine struct {
@@ -22,7 +23,7 @@ type machine struct {
 
 func (m machine) use(t *testing.T) {
 	t.Helper()
-	t.Setenv("ONTHEGO_DATA_HOME", m.state)
+	t.Setenv("ONTHEGO_HOME", m.state)
 	t.Setenv("CODEX_HOME", m.codex)
 	t.Setenv("CLAUDE_CONFIG_DIR", m.claude)
 }
@@ -102,7 +103,10 @@ type pair struct {
 
 func paired(t *testing.T) pair {
 	t.Helper()
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := pair{dir: dir, aRoot: filepath.Join(dir, "a", "project"), bRoot: filepath.Join(dir, "b", "project")}
 	p.a, p.b = newMachine(t, filepath.Join(dir, "a")), newMachine(t, filepath.Join(dir, "b"))
 	p.a.use(t)
@@ -203,8 +207,8 @@ func TestRoundTripPreservesDirtyGitIgnoredOptInAndNativeSessions(t *testing.T) {
 	if got := read(t, filepath.Join(p.aRoot, "file.txt")); got != "continued on laptop\n" {
 		t.Fatal(got)
 	}
-	if got := read(t, filepath.Join(result.Backup, ".env")); got != "LOCAL_ONLY=test\n" {
-		t.Fatal(got)
+	if !strings.HasPrefix(result.Backup, "refs/onthego/backup/") {
+		t.Fatalf("expected Git backup ref, got %q", result.Backup)
 	}
 	if got := read(t, filepath.Join(p.aRoot, ".env")); got != "LOCAL_ONLY=test\n" {
 		t.Fatal("receiver-local environment was removed:", got)
@@ -239,15 +243,22 @@ func TestLocalChangesConflictAndExplicitReplacementRetainsBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := read(t, filepath.Join(result.Backup, "file.txt")); got != "local conflict\n" {
-		t.Fatal(got)
-	}
 	if got := read(t, filepath.Join(p.bRoot, "file.txt")); got != "incoming\n" {
 		t.Fatal(got)
 	}
+	if _, err := Undo(context.Background(), p.bRoot, result.Backup); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(p.bRoot, "file.txt")); got != "local conflict\n" {
+		t.Fatal("backup did not restore conflict:", got)
+	}
+	status, err := Status(context.Background(), p.bRoot)
+	if err != nil || status.HasBaseline || !status.Changed {
+		t.Fatalf("undo must invalidate delivery receipt: %+v %v", status, err)
+	}
 }
 
-func TestNewDestinationSessionIsAConflict(t *testing.T) {
+func TestNewDestinationSessionDoesNotBlockWorkspace(t *testing.T) {
 	p := paired(t)
 	p.firstHandoff(t)
 	p.a.use(t)
@@ -256,13 +267,17 @@ func TestNewDestinationSessionIsAConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.b.use(t)
-	codexSession(t, p.b, p.bRoot, "destination-only", "local work")
+	localSession := codexSession(t, p.b, p.bRoot, "destination-only", "local work")
+	original := read(t, localSession)
 	status, err := Status(context.Background(), p.bRoot)
 	if err != nil || !status.Changed {
 		t.Fatalf("new native session not marked changed: %+v %v", status, err)
 	}
-	if _, err := Apply(context.Background(), path, p.bRoot, p.a.keys.SigningPublic, false); err == nil {
-		t.Fatal("new destination session ignored")
+	if _, err := Apply(context.Background(), path, p.bRoot, p.a.keys.SigningPublic, false); err != nil {
+		t.Fatalf("native session blocked independent workspace handoff: %v", err)
+	}
+	if got := read(t, localSession); got != original {
+		t.Fatal("receiver-only session changed")
 	}
 }
 
@@ -350,15 +365,18 @@ func TestManifestConfigurationIdentityMismatchRejected(t *testing.T) {
 	}
 }
 
-func TestSymlinksSensitiveRootsAndUntrustedSignersRejected(t *testing.T) {
+func TestSymlinkAncestorsNormalizedAndSensitiveRootsUntrustedSignersRejected(t *testing.T) {
 	p := paired(t)
 	p.a.use(t)
 	link := filepath.Join(p.dir, "link")
 	if err := os.Symlink(filepath.Dir(p.aRoot), link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := safeTarget(filepath.Join(link, "project")); err == nil {
-		t.Fatal("symlink parent accepted")
+	if got, err := safeTarget(filepath.Join(link, "project")); err != nil || got != p.aRoot {
+		t.Fatalf("symlink ancestor was not normalized: %q %v", got, err)
+	}
+	if got, err := safeTarget(filepath.Join(link, "new-project")); err != nil || got != filepath.Join(filepath.Dir(p.aRoot), "new-project") {
+		t.Fatalf("missing destination under symlink ancestor: %q %v", got, err)
 	}
 	home, _ := os.UserHomeDir()
 	for _, root := range []string{"/", home, p.a.state, filepath.Dir(p.a.state)} {
@@ -371,17 +389,51 @@ func TestSymlinksSensitiveRootsAndUntrustedSignersRejected(t *testing.T) {
 	}
 }
 
-func TestLinkedWorktreeReplacementRejected(t *testing.T) {
+func TestLinkedWorktreeInPlaceHandoffPreservesOtherWorktree(t *testing.T) {
 	p := paired(t)
 	p.firstHandoff(t)
 	p.b.use(t)
 	linked := filepath.Join(p.dir, "linked")
 	git(t, p.bRoot, "worktree", "add", "-b", "other", linked)
-	if _, _, _, err := inspectDestination(context.Background(), p.bRoot, true); err == nil {
-		t.Fatal("primary repository with linked worktree accepted")
+	primaryInfo, err := os.Stat(p.bRoot)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, _, _, err := inspectDestination(context.Background(), linked, true); err == nil {
-		t.Fatal("linked worktree accepted")
+	linkedInfo, err := os.Stat(linked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitMarker := read(t, filepath.Join(linked, ".git"))
+	p.a.use(t)
+	git(t, p.aRoot, "switch", "-c", "other")
+	write(t, filepath.Join(p.aRoot, "file.txt"), "incoming to linked worktree\n")
+	archive := filepath.Join(p.dir, "linked.otg")
+	if _, err := Export(context.Background(), p.aRoot, archive, p.b.keys.AgeRecipient, "test", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	p.b.use(t)
+	if _, err := Apply(context.Background(), archive, linked, p.a.keys.SigningPublic, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(linked, "file.txt")); got != "incoming to linked worktree\n" {
+		t.Fatal(got)
+	}
+	if got := read(t, filepath.Join(p.bRoot, "file.txt")); got != "committed\n" {
+		t.Fatal("other worktree changed:", got)
+	}
+	if got := read(t, filepath.Join(linked, ".git")); got != gitMarker {
+		t.Fatal("linked worktree Git marker replaced")
+	}
+	afterPrimary, err := os.Stat(p.bRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterLinked, err := os.Stat(linked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(primaryInfo, afterPrimary) || !os.SameFile(linkedInfo, afterLinked) {
+		t.Fatal("worktree directory was replaced")
 	}
 }
 
@@ -396,6 +448,11 @@ func TestTargetLockPreventsConcurrentMutation(t *testing.T) {
 	if _, err := Export(context.Background(), p.aRoot, filepath.Join(p.dir, "locked.otg"), p.b.keys.AgeRecipient, "test", nil, nil); err == nil {
 		t.Fatal("concurrent export accepted")
 	}
+	unlock()
+	// The inode remains deliberately; only the kernel lock owns exclusivity.
+	if _, err := Export(context.Background(), p.aRoot, filepath.Join(p.dir, "after-unlock.otg"), p.b.keys.AgeRecipient, "test", nil, nil); err != nil {
+		t.Fatalf("retained lock file blocked retry: %v", err)
+	}
 }
 
 func TestManagedIgnoredDeletionDoesNotResurrectReceiverCopy(t *testing.T) {
@@ -408,10 +465,12 @@ func TestManagedIgnoredDeletionDoesNotResurrectReceiverCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertSecretNotStoredInGit(t, p.aRoot, "SYNCED_SECRET=test\n")
 	p.b.use(t)
 	if _, err := Apply(context.Background(), first, p.bRoot, p.a.keys.SigningPublic, false); err != nil {
 		t.Fatal(err)
 	}
+	assertSecretNotStoredInGit(t, p.bRoot, "SYNCED_SECRET=test\n")
 	p.a.use(t)
 	if err := MarkSynced(context.Background(), p.aRoot, manifest.SnapshotID); err != nil {
 		t.Fatal(err)
@@ -435,10 +494,29 @@ func TestManagedIgnoredDeletionDoesNotResurrectReceiverCopy(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(p.aRoot, name)); !os.IsNotExist(err) {
 			t.Fatalf("managed deletion resurrected %s: %v", name, err)
 		}
-		if _, err := os.Lstat(filepath.Join(result.Backup, name)); err != nil {
-			t.Fatalf("backup missing %s: %v", name, err)
+	}
+	assertSecretNotStoredInGit(t, p.aRoot, "SYNCED_SECRET=test\n")
+	encrypted, err := filepath.Glob(filepath.Join(p.a.state, "backups", "*.age"))
+	if err != nil || len(encrypted) == 0 {
+		t.Fatalf("secret backup has no encrypted recovery artifact: %v %v", encrypted, err)
+	}
+	if _, err := restore.Undo(context.Background(), p.aRoot, result.Backup); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"ignored.txt": "synchronized ignored file\n", ".env": "SYNCED_SECRET=test\n"} {
+		if got := read(t, filepath.Join(p.aRoot, name)); got != want {
+			t.Fatalf("backup did not recover %s: %q", name, got)
 		}
 	}
+	assertSecretNotStoredInGit(t, p.aRoot, "SYNCED_SECRET=test\n")
+	if err := restore.PruneBackups(context.Background(), p.aRoot, 0); err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err = filepath.Glob(filepath.Join(p.a.state, "backups", "*.age"))
+	if err != nil || len(encrypted) != 0 {
+		t.Fatalf("encrypted artifacts remain after undo and backup pruning: %v %v", encrypted, err)
+	}
+
 }
 
 func transfer(t *testing.T, dir, name string, from machine, fromRoot string, to machine, toRoot string) {
@@ -490,35 +568,52 @@ func TestHubCanSendToDifferentPeersBeforeReturningToFirst(t *testing.T) {
 	}
 }
 
-func TestImportFailureRollsBackProjectAndBaseline(t *testing.T) {
+func TestImportFailurePreservesRecoveryAndDoesNotBlockWorkspace(t *testing.T) {
 	p := paired(t)
-	firstID := p.firstHandoff(t)
+	p.firstHandoff(t)
 	p.a.use(t)
 	write(t, filepath.Join(p.aRoot, "file.txt"), "incoming\n")
-	path := filepath.Join(p.dir, "rollback.otg")
-	if _, err := Export(context.Background(), p.aRoot, path, p.b.keys.AgeRecipient, "test", nil, nil); err != nil {
+	session := codexSession(t, p.a, p.aRoot, "recovery", "must remain recoverable")
+	path := filepath.Join(p.dir, "recoverable.otg")
+	manifest, err := Export(context.Background(), p.aRoot, path, p.b.keys.AgeRecipient, "test", nil, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
 	p.b.use(t)
+	if err := os.MkdirAll(p.b.codex, 0700); err != nil {
+		t.Fatal(err)
+	}
 	unlock, err := fsx.Lock(filepath.Join(p.b.codex, ".onthego-import.lock"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer unlock()
-	if _, err := Apply(context.Background(), path, p.bRoot, p.a.keys.SigningPublic, false); err == nil {
-		t.Fatal("session import lock ignored")
+	result, err := Apply(context.Background(), path, p.bRoot, p.a.keys.SigningPublic, false)
+	if err != nil {
+		t.Fatalf("session import failure blocked workspace: %v", err)
 	}
-	if got := read(t, filepath.Join(p.bRoot, "file.txt")); got != "committed\n" {
-		t.Fatal("project was not rolled back:", got)
+	if len(result.Warnings) == 0 {
+		t.Fatal("session import failure was silent")
+	}
+	if got := read(t, filepath.Join(p.bRoot, "file.txt")); got != "incoming\n" {
+		t.Fatal(got)
 	}
 	status, err := Status(context.Background(), p.bRoot)
-	if err != nil || status.SnapshotID != firstID || status.Changed {
-		t.Fatalf("baseline changed after rollback: %+v %v", status, err)
+	if err != nil || status.SnapshotID != manifest.SnapshotID || status.Changed {
+		t.Fatalf("workspace baseline: %+v %v", status, err)
 	}
-	stages, err := filepath.Glob(filepath.Join(filepath.Dir(p.bRoot), ".onthego-stage-*"))
-	if err != nil || len(stages) != 0 {
-		t.Fatalf("orphan restore stages: %v %v", stages, err)
+	recovery := sessionRecoveryDirectory(t, p.b)
+	recovered := filepath.Join(recovery, "codex", "sessions", "2026", "10", "16", filepath.Base(session))
+	if got := read(t, recovered); got != read(t, session) {
+		t.Fatal("recovery changed original authenticated session")
 	}
+	for path, want := range map[string]os.FileMode{recovery: 0700, recovered: 0600} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != want {
+			t.Fatalf("private recovery permissions %s: %v %v", path, info, err)
+		}
+	}
+	assertNoPlaintextStaging(t, p.b)
 }
 
 func TestPreviewShowsRememberedSecretSelection(t *testing.T) {

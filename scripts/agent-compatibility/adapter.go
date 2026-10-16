@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jbaehova/onthego/internal/agentsessions"
+	"github.com/peerproblem/onthego/internal/agentsessions"
 )
 
 func main() {

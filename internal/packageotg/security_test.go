@@ -10,12 +10,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"filippo.io/age"
-	"github.com/jbaehova/onthego/internal/otgerror"
-	"github.com/jbaehova/onthego/internal/snapshot"
 	"github.com/klauspost/compress/zstd"
+	"github.com/peerproblem/onthego/internal/otgerror"
+	"github.com/peerproblem/onthego/internal/snapshot"
 )
 
 func TestExtractRejectsCiphertextTampering(t *testing.T) {
@@ -108,8 +109,11 @@ func TestExtractRejectsUnsignedPayloadAndUntrustedSigner(t *testing.T) {
 				manifest.PayloadHashes[name] = hex.EncodeToString(hash[:])
 			}
 			manifest.Git.BundleSHA256 = manifest.PayloadHashes["repo.bundle"]
-			manifest.Git.IndexPatchSHA256 = manifest.PayloadHashes["index.patch"]
-			manifest.Git.WorkPatchSHA256 = manifest.PayloadHashes["worktree.patch"]
+			manifest.SourceGitHead = strings.Repeat("a", 40)
+			manifest.Git.WIPCommit = strings.Repeat("b", 40)
+			manifest.Git.IndexTree = strings.Repeat("c", 40)
+			manifest.Git.WorktreeTree = strings.Repeat("d", 40)
+			manifest.Git.UntrackedTree = strings.Repeat("e", 40)
 			expectedSigner := base64.StdEncoding.EncodeToString(public)
 			if test == "unsigned payload" {
 				if err := os.WriteFile(filepath.Join(payload, "extra.txt"), []byte("not signed"), 0o600); err != nil {
@@ -202,5 +206,31 @@ func TestExtractRejectsPathTraversalBeforeWrite(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(base, "escaped")); !os.IsNotExist(err) {
 		t.Fatalf("path traversal wrote outside extraction root: %v", err)
+	}
+}
+
+func TestGitHistoryIsNotCountedAsWorkspacePayload(t *testing.T) {
+	root := t.TempDir()
+	file, err := os.Create(filepath.Join(root, "repo.bundle"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = file.Truncate(MaxPayloadSize + 1); err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	if err = checkPayloadLimits(root, 1000); err != nil {
+		t.Fatalf("Git history hit workspace limit: %v", err)
+	}
+	file, err = os.Create(filepath.Join(root, "context.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = file.Truncate(MaxPayloadSize + 1); err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	if err = checkPayloadLimits(root, 1000); err == nil {
+		t.Fatal("context payload escaped workspace limit")
 	}
 }

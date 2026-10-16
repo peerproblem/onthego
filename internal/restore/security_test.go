@@ -9,18 +9,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jbaehova/onthego/internal/gitx"
-	"github.com/jbaehova/onthego/internal/identity"
-	"github.com/jbaehova/onthego/internal/packageotg"
-	"github.com/jbaehova/onthego/internal/restore"
-	"github.com/jbaehova/onthego/internal/snapshot"
+	"github.com/peerproblem/onthego/internal/gitx"
+	"github.com/peerproblem/onthego/internal/identity"
+	"github.com/peerproblem/onthego/internal/packageotg"
+	"github.com/peerproblem/onthego/internal/restore"
+	"github.com/peerproblem/onthego/internal/snapshot"
 )
 
 func TestRestoreRejectsSelectedPathsThroughGitSymlinksOrMetadata(t *testing.T) {
 	for _, selected := range []string{"link/protected.txt", ".git/config"} {
 		t.Run(selected, func(t *testing.T) {
 			base := t.TempDir()
-			t.Setenv("ONTHEGO_DATA_HOME", filepath.Join(base, "data"))
+			t.Setenv("ONTHEGO_HOME", filepath.Join(base, "data"))
 			repo, payload, outside := filepath.Join(base, "repo"), filepath.Join(base, "payload"), filepath.Join(base, "outside")
 			for _, dir := range []string{repo, payload, outside} {
 				if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -45,7 +45,13 @@ func TestRestoreRejectsSelectedPathsThroughGitSymlinksOrMetadata(t *testing.T) {
 			git("init", "-b", "main")
 			git("add", "link")
 			git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture")
-			git("bundle", "create", filepath.Join(payload, "repo.bundle"), "--all", "HEAD")
+			state, err := gitx.CaptureWIP(context.Background(), repo, base, nil, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = gitx.Bundle(context.Background(), repo, filepath.Join(payload, "repo.bundle"), state.Commit, nil); err != nil {
+				t.Fatal(err)
+			}
 			for _, name := range []string{"index.patch", "worktree.patch"} {
 				if err := os.WriteFile(filepath.Join(payload, name), nil, 0o600); err != nil {
 					t.Fatal(err)
@@ -68,8 +74,10 @@ func TestRestoreRejectsSelectedPathsThroughGitSymlinksOrMetadata(t *testing.T) {
 				manifest.PayloadHashes[name] = hex.EncodeToString(hash[:])
 			}
 			manifest.Git.BundleSHA256 = manifest.PayloadHashes["repo.bundle"]
-			manifest.Git.IndexPatchSHA256 = manifest.PayloadHashes["index.patch"]
-			manifest.Git.WorkPatchSHA256 = manifest.PayloadHashes["worktree.patch"]
+			manifest.Git.WIPCommit = state.Commit
+			manifest.Git.IndexTree = state.IndexTree
+			manifest.Git.WorktreeTree = state.WorktreeTree
+			manifest.Git.UntrackedTree = state.UntrackedTree
 			manifest.Files = []snapshot.File{{RelativePath: selected, ArchivePath: archivePath, Kind: "file", Mode: 0o600, SHA256: manifest.PayloadHashes[archivePath]}}
 			keys, err := identity.LoadOrCreate()
 			if err != nil {

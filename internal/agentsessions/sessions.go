@@ -18,7 +18,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/jbaehova/onthego/internal/fsx"
+	"github.com/peerproblem/onthego/internal/fsx"
 )
 
 const (

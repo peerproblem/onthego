@@ -105,7 +105,7 @@ func TestDataRootUsesPersonalHomeAndExplicitOverrides(t *testing.T) {
 	assertRoot(filepath.Join(home, ".onthego"))
 	legacy := filepath.Join(home, "legacy")
 	t.Setenv("ONTHEGO_DATA_HOME", legacy)
-	assertRoot(legacy)
+	assertRoot(filepath.Join(home, ".onthego"))
 	preferred := filepath.Join(home, "preferred")
 	t.Setenv("ONTHEGO_HOME", preferred)
 	assertRoot(preferred)
@@ -204,5 +204,34 @@ func TestUserConfigRejectsSymlinksAndUnknownSecretFields(t *testing.T) {
 	}
 	if _, err := LoadUser(); err == nil {
 		t.Fatal("accepted unsupported credential field")
+	}
+}
+
+func TestDevicesAreIndependentOfProjectPaths(t *testing.T) {
+	t.Setenv("ONTHEGO_HOME", t.TempDir())
+	user := UserConfig{Devices: map[string]Device{"laptop": {Host: "me@laptop", Home: "/Users/me"}}}
+	if err := SaveUser(user); err != nil {
+		t.Fatal(err)
+	}
+	for id, path := range map[string]string{"app-one": "/work/one", "app-two": "/work/two"} {
+		if err := SetProjectPeer(id, "laptop", path); err != nil {
+			t.Fatal(err)
+		}
+		peers, err := LoadProjectPeers(id)
+		if err != nil || peers.Peers["laptop"] != path {
+			t.Fatalf("peers %s = %+v, %v", id, peers, err)
+		}
+		file, _ := ProjectPeersPath(id)
+		info, _ := os.Stat(file)
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("peers permissions = %v", info.Mode())
+		}
+	}
+	loaded, err := LoadUser()
+	if err != nil || len(loaded.Devices) != 1 || loaded.Devices["laptop"].Path != "" {
+		t.Fatalf("devices changed: %+v, %v", loaded, err)
+	}
+	if err := SetProjectPeer("app-one", "laptop", "../escape"); err == nil {
+		t.Fatal("relative peer path accepted")
 	}
 }

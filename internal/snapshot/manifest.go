@@ -9,11 +9,11 @@ import (
 	"time"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 type File struct {
 	RelativePath string `json:"relative_path"`
-	ArchivePath  string `json:"archive_path"`
+	ArchivePath  string `json:"archive_path,omitempty"`
 	Kind         string `json:"kind"`
 	SizeBytes    int64  `json:"size_bytes"`
 	Mode         uint32 `json:"mode"`
@@ -24,43 +24,41 @@ type File struct {
 }
 
 type Git struct {
-	OriginURL        string `json:"origin_url,omitempty"`
-	BundleSHA256     string `json:"bundle_sha256"`
-	IndexPatchSHA256 string `json:"index_patch_sha256"`
-	WorkPatchSHA256  string `json:"worktree_patch_sha256"`
-	Ref              string `json:"ref"`
+	OriginURL     string `json:"origin_url,omitempty"`
+	BundleSHA256  string `json:"bundle_sha256"`
+	WIPCommit     string `json:"wip_commit"`
+	IndexTree     string `json:"index_tree"`
+	WorktreeTree  string `json:"worktree_tree"`
+	UntrackedTree string `json:"untracked_tree"`
+	Ref           string `json:"ref"`
 }
 
 type Agent struct {
-	Kind              string `json:"kind"`
-	Version           string `json:"version,omitempty"`
-	SessionID         string `json:"session_id,omitempty"`
-	ContextSHA256     string `json:"context_sha256,omitempty"`
-	ContextEnvelopeID string `json:"context_envelope_id,omitempty"`
+	Kind          string `json:"kind"`
+	Version       string `json:"version,omitempty"`
+	SessionID     string `json:"session_id,omitempty"`
+	ContextSHA256 string `json:"context_sha256,omitempty"`
 }
 
 type Toolchain struct {
-	GitVersion   string `json:"git_version"`
-	CodexVersion string `json:"codex_version,omitempty"`
-	ImageDigest  string `json:"image_digest,omitempty"`
-	Onthego      string `json:"onthego_version"`
+	GitVersion string `json:"git_version"`
+	Onthego    string `json:"onthego_version"`
 }
 
 type Manifest struct {
-	SchemaVersion       int               `json:"schema_version"`
-	SnapshotID          string            `json:"snapshot_id"`
-	ProjectID           string            `json:"project_id"`
-	ParentSnapshotIDs   []string          `json:"parent_snapshot_ids,omitempty"`
-	SourceEnvironmentID string            `json:"source_environment_id"`
-	SourceGitHead       string            `json:"source_git_head"`
-	SourceBranch        string            `json:"source_branch"`
-	CreatedAt           time.Time         `json:"created_at"`
-	Files               []File            `json:"files,omitempty"`
-	Git                 Git               `json:"git"`
-	Agent               Agent             `json:"agent"`
-	Toolchain           Toolchain         `json:"toolchain"`
-	PayloadHashes       map[string]string `json:"payload_hashes"`
-	SignerPublic        string            `json:"signer_public"`
+	SchemaVersion     int               `json:"schema_version"`
+	SnapshotID        string            `json:"snapshot_id"`
+	ProjectID         string            `json:"project_id"`
+	ParentSnapshotIDs []string          `json:"parent_snapshot_ids,omitempty"`
+	SourceGitHead     string            `json:"source_git_head"`
+	SourceBranch      string            `json:"source_branch"`
+	CreatedAt         time.Time         `json:"created_at"`
+	Files             []File            `json:"files,omitempty"`
+	Git               Git               `json:"git"`
+	Agent             Agent             `json:"agent"`
+	Toolchain         Toolchain         `json:"toolchain"`
+	PayloadHashes     map[string]string `json:"payload_hashes"`
+	SignerPublic      string            `json:"signer_public"`
 }
 
 func (m Manifest) Canonical() ([]byte, error) {

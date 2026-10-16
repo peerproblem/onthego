@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/peerproblem/onthego/internal/otgerror"
 )
 
 func TestEndpointValidation(t *testing.T) {
@@ -232,4 +234,35 @@ func TestPeerHelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 	os.Exit(0)
+}
+
+func TestStructuredRemoteErrorPreservesCodeAndRecoveryPath(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "peer")
+	data := "#!/bin/sh\nprintf '%s\\n' '{\"code\":\"E_GENERATION_CONFLICT\",\"message\":\"destination changed\",\"preserved_path\":\"refs/onthego/backup/123\"}' >&2\nexit 6\n"
+	if err := os.WriteFile(binary, []byte(data), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := (Endpoint{Binary: binary}).Run(context.Background(), nil, nil, io.Discard)
+	var remote *otgerror.Error
+	if !errors.As(err, &remote) || remote.Code != otgerror.CodeGenerationConflict || remote.Preserved != "refs/onthego/backup/123" {
+		t.Fatalf("remote error = %#v", err)
+	}
+}
+
+func TestDiscoverBinaryUsesRemoteLoginShell(t *testing.T) {
+	dir := t.TempDir()
+	shell := filepath.Join(dir, "login-shell")
+	if err := os.WriteFile(shell, []byte("#!/bin/sh\n[ \"$1\" = -lc ] || exit 7\n[ \"$2\" = 'command -v onthego' ] || exit 8\nprintf '%s\\n' '/home/user/.local/bin/onthego'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fakeSSH := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(fakeSSH, []byte("#!/bin/sh\nfor arg do command=$arg; done\nexec /bin/sh -c \"$command\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SHELL", shell)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	found, err := DiscoverBinary(context.Background(), Endpoint{Host: "paired-machine"})
+	if err != nil || found != "/home/user/.local/bin/onthego" {
+		t.Fatalf("discovery = %q, %v", found, err)
+	}
 }

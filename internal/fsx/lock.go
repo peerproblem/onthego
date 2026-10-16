@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/jbaehova/onthego/internal/otgerror"
+	"github.com/peerproblem/onthego/internal/otgerror"
 	"golang.org/x/sys/unix"
 )
 

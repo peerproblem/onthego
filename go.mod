@@ -1,4 +1,4 @@
-module github.com/jbaehova/onthego
+module github.com/peerproblem/onthego
 
 go 1.25.4
 

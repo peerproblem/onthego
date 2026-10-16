@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jbaehova/onthego/internal/otgerror"
+	"github.com/peerproblem/onthego/internal/otgerror"
 )
 
 func TestCanonicalResolvesAliasesAndMissingSuffix(t *testing.T) {

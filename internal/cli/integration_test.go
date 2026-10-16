@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jbaehova/onthego/internal/agentsessions"
+	"github.com/peerproblem/onthego/internal/agentsessions"
 )
 
 // Exercise the installed executable and private subprocess protocol with two
@@ -129,7 +129,12 @@ func TestCLIIntegration(t *testing.T) {
 		assertFile(t, filepath.Join(a.root, "ignored-data", "notes.txt"), "continued ignored data\n")
 		assertFile(t, filepath.Join(a.root, ".env"), dotenv)
 		assertFile(t, filepath.Join(a.root, "cache", "machine-local.txt"), "desktop cache\n")
-		assertFile(t, filepath.Join(pull.Backup, "tracked.txt"), "staged and unstaged changes\n")
+		if !strings.HasPrefix(pull.Backup, "refs/onthego/backup/") {
+			t.Fatalf("expected Git backup ref, got %s", pull.Backup)
+		}
+		if got := a.git(t, "show", pull.Backup+":tracked.txt"); got != "staged and unstaged changes\n" {
+			t.Fatalf("backup lost previous worktree: %q", got)
+		}
 		assertCodexMetadata(t, filepath.Join(a.codex, codexRelative), a.root, a.root)
 		assertJSONLContains(t, filepath.Join(a.codex, codexRelative), "message", "laptop continuation")
 		assertJSONLContains(t, filepath.Join(a.claude, claudeRelative), "cwd", a.root)
@@ -146,7 +151,7 @@ func TestCLIIntegration(t *testing.T) {
 		if !errors.As(err, &exit) || exit.ExitCode() != 6 {
 			t.Fatalf("conflicting pull = %v, stdout=%s, stderr=%s; want conflict exit 6", err, stdout, stderr)
 		}
-		if !strings.Contains(stderr, "local file or agent session changes") {
+		if !strings.Contains(stderr, "E_GENERATION_CONFLICT") {
 			t.Fatalf("conflict diagnostic missing: %s", stderr)
 		}
 		assertFile(t, filepath.Join(a.root, "tracked.txt"), "desktop diverged\n")
@@ -215,6 +220,89 @@ func TestCLIIntegration(t *testing.T) {
 		assertFile(t, filepath.Join(b.root, ".env"), second)
 		assertUnchangedStatus(t, a.mustRun(t, "--json", "status"))
 	})
+	t.Run("OneDeviceMultipleProjects", func(t *testing.T) {
+		base := t.TempDir()
+		a := newMachine(t, base, "desktop", binary)
+		b := newMachine(t, base, "laptop", binary)
+		makeRepository(t, a)
+		a.mustRun(t, "init")
+		a.mustRun(t, "device", "add", "laptop", "--local", "--binary", b.wrapper(t))
+		a.mustRun(t, "remote", "set", "laptop", b.root)
+		a.mustRun(t, "push", "laptop")
+		secondA, secondB := a, b
+		secondA.root = filepath.Join(base, "another source")
+		secondB.root = filepath.Join(base, "another destination")
+		makeRepository(t, secondA)
+		secondA.mustRun(t, "init")
+		secondA.mustRun(t, "remote", "set", "laptop", secondB.root)
+		writeFixture(t, filepath.Join(secondA.root, "second-project.txt"), "independent project mapping\n")
+		secondA.mustRun(t, "push", "laptop")
+		assertFile(t, filepath.Join(secondB.root, "second-project.txt"), "independent project mapping\n")
+		assertAbsent(t, filepath.Join(b.root, "second-project.txt"))
+		writeFixture(t, filepath.Join(a.root, "first-project.txt"), "first mapping retained\n")
+		a.mustRun(t, "push", "laptop")
+		assertFile(t, filepath.Join(b.root, "first-project.txt"), "first mapping retained\n")
+		assertAbsent(t, filepath.Join(secondB.root, "first-project.txt"))
+		data := readFixture(t, filepath.Join(a.data, "config.yaml"))
+		if strings.Contains(data, "local_path:") || strings.Contains(data, "path:") {
+			t.Fatalf("project path leaked into device config: %s", data)
+		}
+	})
+
+	t.Run("BackupCommands", func(t *testing.T) {
+		base := t.TempDir()
+		a := newMachine(t, base, "desktop", binary)
+		b := newMachine(t, base, "laptop", binary)
+		makeRepository(t, a)
+		a.mustRun(t, "init")
+		a.mustRun(t, "device", "add", "laptop", "--local-path", b.root, "--binary", b.wrapper(t))
+		a.mustRun(t, "push", "laptop")
+		writeFixture(t, filepath.Join(a.root, "tracked.txt"), "next handoff\n")
+		a.mustRun(t, "push", "laptop")
+		var backups []struct {
+			Ref string `json:"ref"`
+		}
+		decodeJSON(t, b.mustRun(t, "--json", "backups", "list"), &backups)
+		if len(backups) != 1 || !strings.HasPrefix(backups[0].Ref, "refs/onthego/backup/") {
+			t.Fatalf("backups = %+v", backups)
+		}
+		b.mustRun(t, "undo", backups[0].Ref)
+		assertFile(t, filepath.Join(b.root, "tracked.txt"), "original\n")
+		b.mustRun(t, "backups", "prune", "--keep", "0")
+		decodeJSON(t, b.mustRun(t, "--json", "backups", "list"), &backups)
+		if len(backups) != 0 {
+			t.Fatalf("prune kept backups: %+v", backups)
+		}
+	})
+
+	t.Run("PullRecoversLostAcknowledgement", func(t *testing.T) {
+		base := t.TempDir()
+		a := newMachine(t, base, "desktop", binary)
+		b := newMachine(t, base, "laptop", binary)
+		makeRepository(t, a)
+		a.mustRun(t, "init")
+		wrapper := b.wrapper(t)
+		marker := filepath.Join(base, "ack-lost")
+		script := readFixture(t, wrapper)
+		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
+		failure := "if [ \"$1\" = --json ] && [ \"$2\" = peer ] && [ \"$3\" = ack ] && [ ! -e " + quote(marker) + " ]; then : > " + quote(marker) + "; exit 8; fi\n"
+		script = strings.Replace(script, "exec ", failure+"exec ", 1)
+		if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		a.mustRun(t, "device", "add", "laptop", "--local-path", b.root, "--binary", wrapper)
+		a.mustRun(t, "push", "laptop")
+		writeFixture(t, filepath.Join(b.root, "tracked.txt"), "continued after handoff\n")
+		_, stderr, err := a.run(t, "pull", "laptop")
+		if err == nil || !strings.Contains(stderr, "source acknowledgement failed") {
+			t.Fatalf("lost ack did not fail as expected: %v, %s", err, stderr)
+		}
+		assertFile(t, filepath.Join(a.root, "tracked.txt"), "continued after handoff\n")
+		a.mustRun(t, "pull", "laptop")
+		assertUnchangedStatus(t, a.mustRun(t, "--json", "status"))
+		assertUnchangedStatus(t, a.mustRun(t, "--json", "status", "laptop"))
+	})
+
 }
 
 type testMachine struct {

@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jbaehova/onthego/internal/capture"
-	"github.com/jbaehova/onthego/internal/config"
-	"github.com/jbaehova/onthego/internal/gitx"
-	"github.com/jbaehova/onthego/internal/identity"
-	"github.com/jbaehova/onthego/internal/restore"
+	"github.com/peerproblem/onthego/internal/capture"
+	"github.com/peerproblem/onthego/internal/config"
+	"github.com/peerproblem/onthego/internal/gitx"
+	"github.com/peerproblem/onthego/internal/identity"
+	"github.com/peerproblem/onthego/internal/restore"
 )
 
 func TestNamedEnvIsExcludedFromCapture(t *testing.T) {
@@ -29,7 +29,7 @@ func TestNamedEnvIsExcludedFromCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || files[0].RelativePath != "notes.txt" {
+	if len(files) != 3 || !files[0].Excluded || files[1].RelativePath != "notes.txt" || !files[2].Excluded {
 		t.Fatalf("unexpected captured files: %#v", files)
 	}
 	_, err = capture.Preview(context.Background(), capture.Options{Root: root, Config: cfg, Include: []string{"vps.env"}})
@@ -45,7 +45,7 @@ func TestNamedEnvIsExcludedFromCapture(t *testing.T) {
 func TestCaptureRestoreRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
-	t.Setenv("ONTHEGO_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("ONTHEGO_HOME", filepath.Join(base, "data"))
 	root := filepath.Join(base, "source")
 	mustMkdir(t, filepath.Join(root, "evidence"))
 	mustWrite(t, filepath.Join(root, ".gitignore"), []byte("evidence/ignored.bin\n"), 0o644)
@@ -90,15 +90,12 @@ func TestCaptureRestoreRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	packagePath := filepath.Join(base, "snapshot.otg")
-	result, err := capture.Create(ctx, capture.Options{Root: root, Config: cfg, Output: packagePath, ContextDir: contextDir, EnvironmentID: "local", OnthegoVersion: "test", Keys: keys, ParentSnapshotID: "previous", ParentSnapshotIDs: []string{"ancestor", "previous", ""}})
+	result, err := capture.Create(ctx, capture.Options{Root: root, Config: cfg, Output: packagePath, ContextDir: contextDir, OnthegoVersion: "test", Keys: keys, ParentSnapshotID: "previous"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Manifest.Agent.ContextEnvelopeID != "ctx-1" {
-		t.Fatalf("context envelope was not recorded: %#v", result.Manifest.Agent)
-	}
-	if strings.Join(result.Manifest.ParentSnapshotIDs, ",") != "ancestor,previous" {
-		t.Fatalf("snapshot ancestry was not preserved: %#v", result.Manifest.ParentSnapshotIDs)
+	if strings.Join(result.Manifest.ParentSnapshotIDs, ",") != "previous" {
+		t.Fatalf("snapshot retained transitive ancestry: %#v", result.Manifest.ParentSnapshotIDs)
 	}
 	ageIdentity, err := keys.Identity()
 	if err != nil {
@@ -108,7 +105,7 @@ func TestCaptureRestoreRoundTrip(t *testing.T) {
 	if _, err := restore.Package(ctx, packagePath, destination, ageIdentity, keys.SigningPublic); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"symbolic-ref", "--short", "HEAD"}, {"show-ref"}} {
+	for _, args := range [][]string{{"symbolic-ref", "--short", "HEAD"}, {"for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/tags", "refs/stash"}} {
 		assertGitOutput(t, ctx, root, destination, args...)
 	}
 	origin, err := gitx.Run(ctx, destination, "remote", "get-url", "origin")
@@ -146,8 +143,8 @@ func TestCaptureRestoreRoundTrip(t *testing.T) {
 	if err != nil || info.Mode()&0o111 == 0 {
 		t.Fatalf("executable mode was not preserved: %v %v", info, err)
 	}
-	if _, err := os.Stat(filepath.Join(destination, ".onthego.local", "context", "HANDOFF.md")); err != nil {
-		t.Fatalf("context envelope missing after restore: %v", err)
+	if _, err := os.Stat(filepath.Join(destination, ".onthego.local", "context")); !os.IsNotExist(err) {
+		t.Fatalf("plaintext context survived restore: %v", err)
 	}
 }
 
@@ -208,7 +205,7 @@ func TestCaptureRejectsGitMetadataAndSymlinkAncestors(t *testing.T) {
 
 func TestDetachedRestoreHasNoTemporaryRemote(t *testing.T) {
 	base := t.TempDir()
-	t.Setenv("ONTHEGO_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("ONTHEGO_HOME", filepath.Join(base, "data"))
 	root := filepath.Join(base, "source")
 	mustMkdir(t, root)
 	git(t, root, "init")

@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 
 	"filippo.io/age"
-	"github.com/jbaehova/onthego/internal/config"
+	"github.com/peerproblem/onthego/internal/config"
 )
 
 type Keys struct {

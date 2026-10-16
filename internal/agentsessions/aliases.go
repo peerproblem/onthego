@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jbaehova/onthego/internal/fsx"
+	"github.com/peerproblem/onthego/internal/fsx"
 )
 
 // Source aliases are recorded on the source machine, since a receiver on a

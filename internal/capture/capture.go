@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,41 +13,46 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"filippo.io/age"
-	"github.com/jbaehova/onthego/internal/config"
-	"github.com/jbaehova/onthego/internal/gitx"
-	"github.com/jbaehova/onthego/internal/identity"
-	"github.com/jbaehova/onthego/internal/otgerror"
-	"github.com/jbaehova/onthego/internal/packageotg"
-	"github.com/jbaehova/onthego/internal/snapshot"
+	"github.com/peerproblem/onthego/internal/config"
+	"github.com/peerproblem/onthego/internal/fsx"
+	"github.com/peerproblem/onthego/internal/gitx"
+	"github.com/peerproblem/onthego/internal/identity"
+	"github.com/peerproblem/onthego/internal/otgerror"
+	"github.com/peerproblem/onthego/internal/packageotg"
+	"github.com/peerproblem/onthego/internal/snapshot"
 )
 
 type Options struct {
-	Root              string
-	Config            config.Config
-	Output            string
-	ContextDir        string
-	Include           []string
-	IncludeSecret     []string
-	ParentSnapshotID  string
-	ParentSnapshotIDs []string
-	EnvironmentID     string
-	OnthegoVersion    string
-	Recipient         age.Recipient
-	Keys              identity.Keys
+	Root             string
+	Config           config.Config
+	Output           string
+	ContextDir       string
+	Include          []string
+	IncludeSecret    []string
+	ParentSnapshotID string
+	RecipientTips    []string
+	ParentWIPCommit  string
+	OnthegoVersion   string
+	Recipient        age.Recipient
+	Keys             identity.Keys
 }
 
 type Result struct {
-	Manifest snapshot.Manifest `json:"manifest"`
-	Output   string            `json:"output"`
+	Manifest      snapshot.Manifest `json:"manifest"`
+	Output        string            `json:"output"`
+	ExcludedFiles []string          `json:"excluded_files,omitempty"`
+	Fingerprint   string            `json:"fingerprint"`
 }
 
 type PreviewFile struct {
 	RelativePath string `json:"relative_path"`
 	Secret       bool   `json:"secret"`
 	Policy       string `json:"policy"`
+	Excluded     bool   `json:"excluded,omitempty"`
 }
 
 func Preview(ctx context.Context, options Options) ([]PreviewFile, error) {
@@ -64,6 +67,14 @@ func Preview(ctx context.Context, options Options) ([]PreviewFile, error) {
 	for _, file := range selected {
 		result = append(result, PreviewFile{RelativePath: file.Relative, Secret: file.Secret, Policy: file.Policy})
 	}
+	excluded, err := excludedFiles(ctx, options, selected)
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range excluded {
+		result = append(result, PreviewFile{RelativePath: path, Secret: true, Policy: "secret candidate; use --include-secret for permitted files", Excluded: true})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].RelativePath < result[j].RelativePath })
 	return result, nil
 }
 
@@ -74,17 +85,18 @@ type selectedFile struct {
 }
 
 func Create(ctx context.Context, options Options) (Result, error) {
-	if err := gitx.Validate(ctx, options.Root); err != nil {
+	root, err := fsx.Canonical(options.Root)
+	if err != nil {
+		return Result{}, err
+	}
+	options.Root = root
+	if err := gitx.Validate(ctx, root); err != nil {
 		return Result{}, err
 	}
 	if options.Output == "" {
 		return Result{}, otgerror.New(otgerror.CodeInput, "snapshot output path is required")
 	}
-	if options.EnvironmentID == "" {
-		options.EnvironmentID = "local"
-	}
 	if options.Recipient == nil {
-		var err error
 		options.Recipient, err = options.Keys.Recipient()
 		if err != nil {
 			return Result{}, err
@@ -98,15 +110,14 @@ func Create(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if err := os.MkdirAll(dataRoot, 0o700); err != nil {
+	if err = os.MkdirAll(dataRoot, 0700); err != nil {
 		return Result{}, err
 	}
-	unlock, err := acquireLock(filepath.Join(dataRoot, "capture.lock"))
+	unlock, err := fsx.Lock(filepath.Join(dataRoot, "capture.lock"))
 	if err != nil {
 		return Result{}, err
 	}
 	defer unlock()
-
 	before, err := Fingerprint(ctx, options)
 	if err != nil {
 		return Result{}, err
@@ -115,104 +126,92 @@ func Create(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	payload, err := os.MkdirTemp(dataRoot, "capture-*")
+	omitted, err := excludedFiles(ctx, options, selected)
 	if err != nil {
 		return Result{}, err
 	}
-	defer os.RemoveAll(payload)
-
-	head, err := gitText(ctx, options.Root, "rev-parse", "HEAD")
+	home, err := config.DataRoot()
 	if err != nil {
 		return Result{}, err
 	}
-	branch, err := gitText(ctx, options.Root, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if err != nil {
-		branch = "(detached)"
-	}
-	bundlePath := filepath.Join(payload, "repo.bundle")
-	if _, err := gitx.Run(ctx, options.Root, "bundle", "create", bundlePath, "--all", "HEAD"); err != nil {
-		return Result{}, err
-	}
-	indexPatch, err := gitx.Run(ctx, options.Root, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv")
+	temp, err := fsx.TempDir(home, "capture-")
 	if err != nil {
 		return Result{}, err
 	}
-	workPatch, err := gitx.Run(ctx, options.Root, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv")
-	if err != nil {
+	defer fsx.ReleaseTemp(temp)
+	payload := filepath.Join(temp, "payload")
+	if err = os.Mkdir(payload, 0700); err != nil {
 		return Result{}, err
 	}
-	if err := os.WriteFile(filepath.Join(payload, "index.patch"), indexPatch.Stdout, 0o600); err != nil {
-		return Result{}, err
+	manifest := snapshot.Manifest{SchemaVersion: snapshot.SchemaVersion, ProjectID: options.Config.ProjectID, CreatedAt: time.Now().UTC(), PayloadHashes: map[string]string{}, SignerPublic: options.Keys.SigningPublic, Toolchain: snapshot.Toolchain{Onthego: options.OnthegoVersion}}
+	if options.ParentSnapshotID != "" {
+		manifest.ParentSnapshotIDs = []string{options.ParentSnapshotID}
 	}
-	if err := os.WriteFile(filepath.Join(payload, "worktree.patch"), workPatch.Stdout, 0o600); err != nil {
-		return Result{}, err
-	}
-
-	manifest := snapshot.Manifest{
-		SchemaVersion:       snapshot.SchemaVersion,
-		ProjectID:           options.Config.ProjectID,
-		SourceEnvironmentID: options.EnvironmentID,
-		SourceGitHead:       head,
-		SourceBranch:        branch,
-		CreatedAt:           time.Now().UTC().Truncate(time.Second),
-		PayloadHashes:       map[string]string{},
-		Toolchain: snapshot.Toolchain{
-			Onthego: options.OnthegoVersion,
-		},
-		SignerPublic: options.Keys.SigningPublic,
-	}
-	parents := map[string]bool{}
-	for _, id := range append(append([]string(nil), options.ParentSnapshotIDs...), options.ParentSnapshotID) {
-		if id != "" && !parents[id] {
-			manifest.ParentSnapshotIDs = append(manifest.ParentSnapshotIDs, id)
-			parents[id] = true
-		}
-	}
-	sort.Strings(manifest.ParentSnapshotIDs)
 	manifest.Toolchain.GitVersion, _ = gitx.Version(ctx)
-	manifest.Git.Ref = branch
-	if origin, err := gitText(ctx, options.Root, "remote", "get-url", "origin"); err == nil {
-		manifest.Git.OriginURL = gitx.SafeOriginURL(origin)
-	}
-	for _, item := range []struct {
-		name string
-		path string
-	}{
-		{"repo.bundle", bundlePath},
-		{"index.patch", filepath.Join(payload, "index.patch")},
-		{"worktree.patch", filepath.Join(payload, "worktree.patch")},
-	} {
-		hash, _, err := hashRegular(item.path)
-		if err != nil {
-			return Result{}, err
-		}
-		manifest.PayloadHashes[item.name] = hash
-		switch item.name {
-		case "repo.bundle":
-			manifest.Git.BundleSHA256 = hash
-		case "index.patch":
-			manifest.Git.IndexPatchSHA256 = hash
-		case "worktree.patch":
-			manifest.Git.WorkPatchSHA256 = hash
-		}
-	}
-
+	var extra []string
 	for _, file := range selected {
-		entry, err := copySelected(options.Root, payload, file)
-		if err != nil {
-			return Result{}, err
+		entry, e := describeSelected(root, file)
+		if e != nil {
+			return Result{}, e
+		}
+		if entry.Secret {
+			entry.ArchivePath = "secret-files/" + entry.RelativePath
+			destination := filepath.Join(payload, filepath.FromSlash(entry.ArchivePath))
+			if err = os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
+				return Result{}, err
+			}
+			if entry.Kind == "symlink" {
+				err = os.WriteFile(destination, []byte(entry.LinkTarget), 0600)
+			} else {
+				err = fsx.CopyRegular(filepath.Join(root, filepath.FromSlash(entry.RelativePath)), destination, 0600)
+			}
+			if err != nil {
+				return Result{}, err
+			}
+			manifest.PayloadHashes[entry.ArchivePath] = entry.SHA256
+		} else {
+			extra = append(extra, file.Relative)
 		}
 		manifest.Files = append(manifest.Files, entry)
-		if entry.Kind == "file" {
-			manifest.PayloadHashes[entry.ArchivePath] = entry.SHA256
+	}
+	state, err := gitx.CaptureWIP(ctx, root, temp, extra, options.ParentWIPCommit)
+	if err != nil {
+		return Result{}, err
+	}
+	manifest.SourceGitHead = state.Head
+	manifest.SourceBranch = state.Branch
+	manifest.Git = snapshot.Git{Ref: state.Branch, WIPCommit: state.Commit, IndexTree: state.IndexTree, WorktreeTree: state.WorktreeTree, UntrackedTree: state.UntrackedTree}
+	if origin, e := gitText(ctx, root, "remote", "get-url", "origin"); e == nil {
+		manifest.Git.OriginURL = gitx.SafeOriginURL(origin)
+	}
+	remaining := packageotg.MaxPayloadSize
+	for _, file := range manifest.Files {
+		if file.Secret {
+			remaining -= file.SizeBytes
 		}
 	}
+	if remaining < 0 {
+		return Result{}, fmt.Errorf("secret files exceed workspace payload limit")
+	}
+	if err = gitx.CheckWorkspaceSize(ctx, root, state.Head, []string{state.IndexTree, state.WorktreeTree}, state.UntrackedTree, remaining); err != nil {
+		return Result{}, err
+	}
+	bundle := filepath.Join(payload, "repo.bundle")
+	if err = gitx.Bundle(ctx, root, bundle, state.Commit, options.RecipientTips); err != nil {
+		return Result{}, err
+	}
+	hash, _, err := hashRegular(bundle)
+	if err != nil {
+		return Result{}, err
+	}
+	manifest.Git.BundleSHA256 = hash
+	manifest.PayloadHashes["repo.bundle"] = hash
 	if options.ContextDir != "" {
-		if err := copyContext(options.ContextDir, payload, &manifest); err != nil {
+		if err = copyContext(options.ContextDir, payload, &manifest); err != nil {
 			return Result{}, err
 		}
 	}
-	if err := manifest.SetSnapshotID(); err != nil {
+	if err = manifest.SetSnapshotID(); err != nil {
 		return Result{}, err
 	}
 	after, err := Fingerprint(ctx, options)
@@ -222,18 +221,38 @@ func Create(ctx context.Context, options Options) (Result, error) {
 	if before != after {
 		return Result{}, &otgerror.Error{Code: otgerror.CodeSourceChanged, Message: "project changed while the snapshot was being captured", Retryable: true, Stage: "capture"}
 	}
-	if err := os.MkdirAll(filepath.Dir(options.Output), 0o700); err != nil {
+	if err = os.MkdirAll(filepath.Dir(options.Output), 0700); err != nil {
 		return Result{}, err
 	}
-	if _, err := os.Stat(options.Output); err == nil {
+	if _, err = os.Lstat(options.Output); err == nil {
 		return Result{}, otgerror.New(otgerror.CodeInput, "snapshot output already exists")
 	} else if !os.IsNotExist(err) {
 		return Result{}, err
 	}
-	if err := packageotg.Create(payload, options.Output, manifest, options.Recipient, signer); err != nil {
+	if err = packageotg.CreateContext(ctx, payload, options.Output, manifest, options.Recipient, signer); err != nil {
 		return Result{}, err
 	}
-	return Result{Manifest: manifest, Output: options.Output}, nil
+	return Result{Manifest: manifest, Output: options.Output, ExcludedFiles: omitted, Fingerprint: before}, nil
+}
+
+func excludedFiles(ctx context.Context, options Options, selected []selectedFile) ([]string, error) {
+	accepted := map[string]bool{}
+	for _, f := range selected {
+		accepted[f.Relative] = true
+	}
+	r, e := gitx.Run(ctx, options.Root, "ls-files", "--others", "--exclude-standard", "-z")
+	if e != nil {
+		return nil, e
+	}
+	var out []string
+	for _, p := range bytes.Split(r.Stdout, []byte{0}) {
+		s := string(p)
+		if s != "" && !accepted[s] && !excluded(s, options.Config.Exclude) && (isSecretCandidate(s) || alwaysDenied(s)) {
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func selectFiles(ctx context.Context, options Options) ([]selectedFile, error) {
@@ -347,7 +366,7 @@ func expand(root, raw string) ([]string, error) {
 	return result, nil
 }
 
-func copySelected(root, payload string, selected selectedFile) (snapshot.File, error) {
+func describeSelected(root string, selected selectedFile) (snapshot.File, error) {
 	if err := packageotg.CheckParents(root, selected.Relative); err != nil {
 		return snapshot.File{}, err
 	}
@@ -356,27 +375,16 @@ func copySelected(root, payload string, selected selectedFile) (snapshot.File, e
 	if err != nil {
 		return snapshot.File{}, err
 	}
-	archivePath := "files/" + selected.Relative
-	entry := snapshot.File{RelativePath: selected.Relative, ArchivePath: archivePath, Mode: uint32(info.Mode().Perm()), Secret: selected.Secret, PolicySource: selected.Policy}
-	destination := filepath.Join(payload, filepath.FromSlash(archivePath))
-	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-		return snapshot.File{}, err
-	}
+	entry := snapshot.File{RelativePath: selected.Relative, Mode: uint32(info.Mode().Perm()), Secret: selected.Secret, PolicySource: selected.Policy, SizeBytes: info.Size()}
 	if info.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(source)
-		if err != nil {
-			return snapshot.File{}, err
-		}
-		if filepath.IsAbs(target) {
-			return snapshot.File{}, otgerror.New(otgerror.CodeSecretPolicy, "absolute symlink is not portable: "+selected.Relative)
+		target, e := os.Readlink(source)
+		if e != nil {
+			return entry, e
 		}
 		resolved := filepath.Clean(filepath.Join(filepath.Dir(source), target))
-		rel, err := filepath.Rel(root, resolved)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return snapshot.File{}, otgerror.New(otgerror.CodeSecretPolicy, "symlink escapes project root: "+selected.Relative)
-		}
-		if err := os.Symlink(target, destination); err != nil {
-			return snapshot.File{}, err
+		rel, e := filepath.Rel(root, resolved)
+		if filepath.IsAbs(target) || e != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return entry, otgerror.New(otgerror.CodeSecretPolicy, "symlink escapes project root: "+selected.Relative)
 		}
 		entry.Kind = "symlink"
 		entry.LinkTarget = target
@@ -384,17 +392,13 @@ func copySelected(root, payload string, selected selectedFile) (snapshot.File, e
 		return entry, nil
 	}
 	if !info.Mode().IsRegular() {
-		return snapshot.File{}, fmt.Errorf("unsupported selected file type: %s", selected.Relative)
-	}
-	mode := info.Mode().Perm()
-	if selected.Secret {
-		mode = 0o600
-	}
-	if err := copyRegular(source, destination, mode); err != nil {
-		return snapshot.File{}, err
+		return entry, fmt.Errorf("unsupported selected file type: %s", selected.Relative)
 	}
 	entry.Kind = "file"
-	entry.SHA256, entry.SizeBytes, err = hashRegular(destination)
+	entry.SHA256, entry.SizeBytes, err = hashRegular(source)
+	if selected.Secret {
+		entry.Mode = 0600
+	}
 	return entry, err
 }
 
@@ -432,25 +436,11 @@ func copyContext(source, payload string, manifest *snapshot.Manifest) error {
 	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(filepath.Join(source, "context-envelope.json"))
-	if err == nil {
-		// Retain optional legacy archive metadata without the retired summary
-		// and agent-evidence collection subsystem.
-		var envelope struct {
-			ID           string `json:"id"`
-			AgentKind    string `json:"agent_kind"`
-			AgentVersion string `json:"agent_version"`
-			SessionID    string `json:"session_id"`
-		}
-		if json.Unmarshal(data, &envelope) == nil {
-			manifest.Agent = snapshot.Agent{Kind: envelope.AgentKind, Version: envelope.AgentVersion, SessionID: envelope.SessionID, ContextEnvelopeID: envelope.ID, ContextSHA256: hashBytes(data)}
-		}
-	}
 	return nil
 }
 
 // Fingerprint describes the current workspace without timestamps or generated
-// snapshot metadata. It includes selected ignored files and all Git refs, and
+// snapshot metadata. It includes selected ignored files and the active branch state, and
 // re-discovers untracked files on every call so additions cannot go unnoticed.
 func Fingerprint(ctx context.Context, options Options) (string, error) {
 	if err := gitx.Validate(ctx, options.Root); err != nil {
@@ -472,75 +462,95 @@ func fingerprint(ctx context.Context, root string, selected []selectedFile) ([]b
 	if err != nil {
 		return nil, err
 	}
-	index, err := gitx.Run(ctx, root, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv")
-	if err != nil {
-		return nil, err
-	}
-	work, err := gitx.Run(ctx, root, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv")
+	index, err := gitx.Run(ctx, root, "ls-files", "--stage", "-z")
 	if err != nil {
 		return nil, err
 	}
 	hash := sha256.New()
-	write := func(data []byte) {
-		fmt.Fprintf(hash, "%d:", len(data))
-		hash.Write(data)
-	}
+	write := func(data []byte) { fmt.Fprintf(hash, "%d:", len(data)); hash.Write(data) }
 	write([]byte(head))
-	for _, args := range [][]string{{"for-each-ref", "--format=%(refname) %(objectname)"}, {"symbolic-ref", "--quiet", "HEAD"}} {
-		result, err := gitx.Run(ctx, root, args...)
-		if err != nil && args[0] != "symbolic-ref" {
-			return nil, err
-		}
-		write(result.Stdout)
-	}
 	write(index.Stdout)
-	write(work.Stdout)
+	branch, err := gitx.Run(ctx, root, "symbolic-ref", "--quiet", "HEAD")
+	if err != nil && len(branch.Stderr) > 0 {
+		return nil, err
+	}
+	write(branch.Stdout)
+	secret := map[string]bool{}
 	for _, file := range selected {
-		write([]byte(file.Relative))
-		path := filepath.Join(root, filepath.FromSlash(file.Relative))
-		info, err := os.Lstat(path)
+		if file.Secret {
+			secret[file.Relative] = true
+		}
+	}
+	seen := map[string]bool{}
+	leaf := func(path string, missingOK bool) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		write([]byte(path))
+		absolute := filepath.Join(root, filepath.FromSlash(path))
+		info, err := os.Lstat(absolute)
+		if missingOK && (os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR)) {
+			write([]byte("missing"))
+			return nil
+		}
 		if err != nil {
+			return err
+		}
+		if err = fsx.CheckParents(root, path); err != nil {
+			return err
+		}
+		if missingOK && info.IsDir() {
+			write([]byte("missing"))
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(absolute)
+			if err != nil {
+				return err
+			}
+			write([]byte("120000"))
+			write([]byte(target))
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported workspace file type: %s", path)
+		}
+		mode := "100644"
+		if info.Mode().Perm()&0111 != 0 && !secret[path] {
+			mode = "100755"
+		}
+		write([]byte(mode))
+		digest, _, err := fsx.HashRegular(absolute)
+		if err != nil {
+			return err
+		}
+		write([]byte(digest))
+		return nil
+	}
+	for _, entry := range bytes.Split(index.Stdout, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		parts := bytes.SplitN(entry, []byte{'\t'}, 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid Git index entry")
+		}
+		path := string(parts[1])
+		seen[path] = true
+		if err = leaf(path, true); err != nil {
 			return nil, err
 		}
-		mode := info.Mode()
-		if file.Secret && mode.IsRegular() {
-			mode = 0o600
+	}
+	for _, file := range selected {
+		if seen[file.Relative] {
+			continue
 		}
-		write([]byte(mode.String()))
-		if info.Mode()&os.ModeSymlink != 0 {
-			target, err := os.Readlink(path)
-			if err != nil {
-				return nil, err
-			}
-			write([]byte(target))
-		} else {
-			if !info.Mode().IsRegular() {
-				return nil, fmt.Errorf("unsupported selected file type: %s", file.Relative)
-			}
-			fileHash, _, err := hashRegular(path)
-			if err != nil {
-				return nil, err
-			}
-			write([]byte(fileHash))
+		seen[file.Relative] = true
+		if err = leaf(file.Relative, false); err != nil {
+			return nil, err
 		}
 	}
 	return hash.Sum(nil), nil
-}
-
-func acquireLock(path string) (func(), error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		if os.IsExist(err) {
-			return nil, otgerror.New(otgerror.CodePrecondition, "another ONTHEGO capture is active")
-		}
-		return nil, err
-	}
-	fmt.Fprintf(file, "%d\n", os.Getpid())
-	if err := file.Close(); err != nil {
-		os.Remove(path)
-		return nil, err
-	}
-	return func() { _ = os.Remove(path) }, nil
 }
 
 func gitText(ctx context.Context, root string, args ...string) (string, error) {
@@ -608,21 +618,10 @@ func excluded(path string, patterns []string) bool {
 func alwaysDenied(path string) bool {
 	lower := strings.ToLower(filepath.ToSlash(path))
 	base := strings.ToLower(filepath.Base(lower))
-	return lower == ".git" || strings.HasPrefix(lower, ".git/") || strings.Contains(lower, "/.git/") || strings.HasPrefix(lower, ".ssh/") || strings.Contains(lower, "/.ssh/") || base == "auth.json" || base == "credentials" || base == "credentials.json" || base == ".credentials.json" || base == "id_rsa" || base == "id_ed25519" || strings.HasSuffix(base, ".key") || strings.Contains(base, "private_key")
+	return lower == ".git" || strings.HasPrefix(lower, ".git/") || strings.Contains(lower, "/.git/") || strings.HasPrefix(lower, ".ssh/") || strings.Contains(lower, "/.ssh/") || base == "auth.json" || base == "credentials" || base == "credentials.json" || base == ".credentials.json" || base == "id_rsa" || base == "id_ed25519"
 }
 
 func isSecretCandidate(path string) bool {
 	base := strings.ToLower(filepath.Base(path))
-	return base == ".env" || strings.HasPrefix(base, ".env.") || strings.HasSuffix(base, ".env") || strings.HasSuffix(base, ".pem") || strings.Contains(base, "secret") || strings.Contains(base, "token")
-}
-
-func SigningPublic(keys identity.Keys) string {
-	if keys.SigningPublic != "" {
-		return keys.SigningPublic
-	}
-	private, err := base64.StdEncoding.DecodeString(keys.SigningPrivate)
-	if err != nil || len(private) < 32 {
-		return ""
-	}
-	return base64.StdEncoding.EncodeToString(private[len(private)-32:])
+	return base == ".env" || strings.HasPrefix(base, ".env.") || strings.HasSuffix(base, ".env") || strings.HasSuffix(base, ".pem") || strings.HasPrefix(base, "id_") || strings.HasSuffix(base, ".p12")
 }
