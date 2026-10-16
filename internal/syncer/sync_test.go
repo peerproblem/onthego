@@ -10,6 +10,7 @@ import (
 
 	"github.com/jbaehova/onthego/internal/capture"
 	"github.com/jbaehova/onthego/internal/config"
+	"github.com/jbaehova/onthego/internal/fsx"
 	"github.com/jbaehova/onthego/internal/gitx"
 	"github.com/jbaehova/onthego/internal/identity"
 )
@@ -499,7 +500,11 @@ func TestImportFailureRollsBackProjectAndBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.b.use(t)
-	write(t, filepath.Join(p.b.codex, ".onthego-import.lock"), "held by another import\n")
+	unlock, err := fsx.Lock(filepath.Join(p.b.codex, ".onthego-import.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
 	if _, err := Apply(context.Background(), path, p.bRoot, p.a.keys.SigningPublic, false); err == nil {
 		t.Fatal("session import lock ignored")
 	}
