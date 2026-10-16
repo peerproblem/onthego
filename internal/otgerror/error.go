@@ -1,6 +1,10 @@
 package otgerror
 
-import "fmt"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
 
 const (
 	CodeSourceChanged      = "E_SOURCE_CHANGED"
@@ -10,9 +14,7 @@ const (
 	CodeTargetAuth         = "E_TARGET_AUTH"
 	CodeTargetUnavailable  = "E_TARGET_UNAVAILABLE"
 	CodeGenerationConflict = "E_GENERATION_CONFLICT"
-	CodeRunUncertain       = "E_RUN_UNCERTAIN"
 	CodeSessionFormat      = "E_SESSION_FORMAT"
-	CodeAgentAuth          = "E_AGENT_AUTH"
 	CodeRestoreFailed      = "E_RESTORE_FAILED"
 	CodeInput              = "E_INPUT"
 	CodePrecondition       = "E_PRECONDITION"
@@ -46,4 +48,20 @@ func New(code, message string) *Error {
 
 func Wrap(code, message string, cause error) *Error {
 	return &Error{Code: code, Message: message, Cause: cause}
+}
+
+// Public returns the structured error contract without exposing an underlying
+// subprocess error, credential-bearing URL, or native session contents.
+func Public(err error) *Error {
+	var typed *Error
+	if errors.As(err, &typed) {
+		return &Error{Code: typed.Code, Message: typed.Message, Retryable: typed.Retryable, Stage: typed.Stage, Preserved: typed.Preserved}
+	}
+	if errors.Is(err, context.Canceled) {
+		return New(CodePrecondition, "handoff canceled")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return New(CodeTargetUnavailable, "handoff timed out")
+	}
+	return New(CodeInput, "command failed; check the command arguments and local configuration")
 }
