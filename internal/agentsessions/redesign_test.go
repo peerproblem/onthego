@@ -192,7 +192,7 @@ func TestSelectionAndCacheInvalidationWhenMtimeIsRestored(t *testing.T) {
 		t.Fatalf("stale cache: %#v %v", changed, err)
 	}
 	missing, err := DiscoverWithOptions(project, roots, Selection{IDs: []string{"missing"}})
-	if err != nil || len(missing.Sessions) != 0 || len(missing.Warnings) != 1 {
+	if err == nil || len(missing.Sessions) != 0 || !strings.Contains(err.Error(), "E_INPUT") || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("missing ID: %#v %v", missing, err)
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"unicode/utf16"
 
 	"github.com/peerproblem/onthego/internal/fsx"
+	"github.com/peerproblem/onthego/internal/otgerror"
 )
 
 const (
@@ -51,6 +52,7 @@ type Manifest struct {
 }
 
 type ImportResult struct {
+	Status         string    `json:"status,omitempty"`
 	Imported       int       `json:"imported"`
 	Updated        int       `json:"updated"`
 	Skipped        int       `json:"skipped"`
@@ -89,6 +91,12 @@ func Export(projectRoot, bundleDir string, roots Roots) (Manifest, error) {
 }
 
 func ExportWithOptions(projectRoot, bundleDir string, roots Roots, selection Selection) (Manifest, error) {
+	if err := ValidateSelection(selection); err != nil {
+		return Manifest{}, err
+	}
+	if selection.None {
+		return Manifest{SchemaVersion: SchemaVersion, Sessions: []Session{}}, nil
+	}
 	root, err := fsx.Canonical(projectRoot)
 	if err != nil {
 		return Manifest{}, err
@@ -153,31 +161,22 @@ func ValidateImportWithOptions(bundleDir, projectRoot string, roots Roots, optio
 }
 
 func planImport(bundleDir, projectRoot string, roots Roots, options ImportOptions) ([]writePlan, ImportResult, error) {
+	manifest, err := readManifest(bundleDir)
+	if err != nil {
+		return nil, ImportResult{}, err
+	}
+	return planImportManifest(bundleDir, projectRoot, roots, options, manifest)
+}
+
+func planImportManifest(bundleDir, projectRoot string, roots Roots, options ImportOptions, manifest Manifest) ([]writePlan, ImportResult, error) {
 	if options.ConflictPolicy == "" {
 		options.ConflictPolicy = "keep-both"
 	}
 	if options.ConflictPolicy != "skip" && options.ConflictPolicy != "theirs" && options.ConflictPolicy != "keep-both" {
-		return nil, ImportResult{}, errors.New("session conflict policy must be skip, theirs, or keep-both")
+		return nil, ImportResult{}, otgerror.New(otgerror.CodeInput, "session conflict policy must be skip, theirs, or keep-both")
 	}
 	root, err := fsx.Canonical(projectRoot)
 	if err != nil {
-		return nil, ImportResult{}, err
-	}
-	if err := noSymlinks(bundleDir, "manifest.json"); err != nil {
-		return nil, ImportResult{}, err
-	}
-	data, err := readStable(filepath.Join(bundleDir, "manifest.json"), 8<<20)
-	if err != nil {
-		return nil, ImportResult{}, err
-	}
-	var manifest Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return nil, ImportResult{}, err
-	}
-	if manifest.SchemaVersion != SchemaVersion || !filepath.IsAbs(manifest.SourceRoot) || filepath.Clean(manifest.SourceRoot) != manifest.SourceRoot || manifest.SourceRoot == string(filepath.Separator) {
-		return nil, ImportResult{}, errors.New("invalid native session manifest")
-	}
-	if err := validateAliases(manifest.SourceAliases, manifest.SourceRoot); err != nil {
 		return nil, ImportResult{}, err
 	}
 	result := ImportResult{Warnings: append([]string(nil), warnings...)}
@@ -234,7 +233,7 @@ func planImport(bundleDir, projectRoot string, roots Roots, options ImportOption
 			relative = "projects/" + ProjectDirectory(remap(aliasPath(session.CWD, manifest.SourceAliases), manifest.SourceRoot, root)) + "/" + strings.Join(parts[2:], "/")
 		}
 		if home == "" {
-			return nil, result, fmt.Errorf("%s home is required to import captured sessions", session.Agent)
+			return nil, result, otgerror.New(otgerror.CodeInput, fmt.Sprintf("%s home is required to import captured sessions", session.Agent))
 		}
 		home, err = absolute(home)
 		if err != nil {
@@ -284,7 +283,7 @@ func planImport(bundleDir, projectRoot string, roots Roots, options ImportOption
 				case "theirs":
 					result.Updated++
 					plans = append(plans, writePlan{home, relative, incoming, previous, true})
-					result.Warnings = append(result.Warnings, fmt.Sprintf("Replaced divergent %s session %s with incoming history (--sessions=theirs).", session.Agent, session.ID))
+					result.Warnings = append(result.Warnings, fmt.Sprintf("Replaced divergent %s session %s with incoming history (--session-conflict=theirs).", session.Agent, session.ID))
 				case "keep-both":
 					archive, archivePath, archiveErr := conflictPlan(options.ConflictsDir, session, incoming)
 					if archiveErr != nil {
@@ -322,12 +321,20 @@ func Import(bundleDir, projectRoot string, roots Roots) (ImportResult, error) {
 }
 
 func ImportWithOptions(bundleDir, projectRoot string, roots Roots, options ImportOptions) (ImportResult, error) {
-	// Lock both adapters in a stable order so simultaneous onthego imports cannot
+	manifest, err := readManifest(bundleDir)
+	if err != nil {
+		return ImportResult{}, err
+	}
+	// Lock only included adapters in a stable order so simultaneous imports cannot
 	// race. Native agents do not honor this lock and must be stopped by the user.
 	var homes []string
-	for _, home := range []string{roots.CodexHome, roots.ClaudeHome} {
+	for _, session := range manifest.Sessions {
+		home := roots.CodexHome
+		if session.Agent == "claude" {
+			home = roots.ClaudeHome
+		}
 		if home == "" {
-			continue
+			return ImportResult{}, otgerror.New(otgerror.CodeInput, fmt.Sprintf("%s home is required to import captured sessions", session.Agent))
 		}
 		if err := noSymlinks(home, "."); err != nil {
 			return ImportResult{}, err
@@ -359,7 +366,7 @@ func ImportWithOptions(bundleDir, projectRoot string, roots Roots, options Impor
 		}
 		locks = append(locks, unlock)
 	}
-	plans, result, err := planImport(bundleDir, projectRoot, roots, options)
+	plans, result, err := planImportManifest(bundleDir, projectRoot, roots, options, manifest)
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -418,6 +425,32 @@ func ImportWithOptions(bundleDir, projectRoot string, roots Roots, options Impor
 		}
 	}
 	return result, nil
+}
+
+func readManifest(bundleDir string) (Manifest, error) {
+	if err := noSymlinks(bundleDir, "manifest.json"); err != nil {
+		return Manifest{}, err
+	}
+	data, err := readStable(filepath.Join(bundleDir, "manifest.json"), 8<<20)
+	if err != nil {
+		return Manifest{}, err
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return Manifest{}, err
+	}
+	if manifest.SchemaVersion != SchemaVersion || !filepath.IsAbs(manifest.SourceRoot) || filepath.Clean(manifest.SourceRoot) != manifest.SourceRoot || manifest.SourceRoot == string(filepath.Separator) {
+		return Manifest{}, otgerror.New(otgerror.CodeSessionFormat, "invalid native session manifest")
+	}
+	if err := validateAliases(manifest.SourceAliases, manifest.SourceRoot); err != nil {
+		return Manifest{}, err
+	}
+	for _, session := range manifest.Sessions {
+		if err := validatePath(session.Agent, session.Path); err != nil {
+			return Manifest{}, err
+		}
+	}
+	return manifest, nil
 }
 
 func rollback(plans []writePlan) error {
@@ -650,7 +683,7 @@ func readStable(path string, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("native session is not a regular file: %s", path)
 	}
 	if before.Size() > limit {
-		return nil, fmt.Errorf("native session file exceeds %d byte limit: %s", limit, path)
+		return nil, otgerror.New(otgerror.CodeSessionFormat, fmt.Sprintf("native session file exceeds %d byte limit: %s", limit, path))
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -659,7 +692,7 @@ func readStable(path string, limit int64) ([]byte, error) {
 	defer file.Close()
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(before, opened) {
-		return nil, errors.New("native session changed while opening")
+		return nil, otgerror.New(otgerror.CodeSourceChanged, "native session changed while opening")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil {
@@ -670,7 +703,7 @@ func readStable(path string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if !os.SameFile(before, after) || before.Size() != int64(len(data)) || !before.ModTime().Equal(after.ModTime()) || (changeTime(before) != nil && !unchanged(before, after)) {
-		return nil, errors.New("native session changed while reading; stop the agent before handoff")
+		return nil, otgerror.New(otgerror.CodeSourceChanged, "native session changed while reading; stop the agent before handoff")
 	}
 	return data, nil
 }

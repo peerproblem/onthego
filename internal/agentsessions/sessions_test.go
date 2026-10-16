@@ -261,8 +261,8 @@ func TestOSAncestorSymlinkIsAllowedButAgentHomeSymlinkIsRejected(t *testing.T) {
 	if _, err := Discover(project, Roots{CodexHome: home}); err != nil {
 		t.Fatalf("OS-style ancestor symlink rejected: %v", err)
 	}
-	if _, err := Discover(project, Roots{CodexHome: alias}); err == nil {
-		t.Fatal("symlinked agent home accepted")
+	if result, err := DiscoverWithOptions(project, Roots{CodexHome: alias}, Selection{}); err != nil || len(result.Sessions) != 0 || len(result.Warnings) != 1 {
+		t.Fatalf("symlinked agent home was not skipped with a warning: %#v, %v", result, err)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/peerproblem/onthego/internal/fsx"
+	"github.com/peerproblem/onthego/internal/otgerror"
 )
 
 const DefaultRecentDays = 7
@@ -23,7 +24,27 @@ const DefaultRecentDays = 7
 type Selection struct {
 	IDs        []string `json:"ids,omitempty"`
 	All        bool     `json:"all,omitempty"`
+	None       bool     `json:"none,omitempty"`
 	RecentDays int      `json:"recent_days,omitempty"`
+}
+
+// ValidateSelection is shared by command previews and actual exports.
+func ValidateSelection(selection Selection) error {
+	if selection.RecentDays < 0 {
+		return otgerror.New(otgerror.CodeInput, "session recent days must not be negative")
+	}
+	if selection.All && len(selection.IDs) > 0 {
+		return otgerror.New(otgerror.CodeInput, "all sessions and explicit session IDs are mutually exclusive")
+	}
+	if selection.None && (selection.All || len(selection.IDs) > 0) {
+		return otgerror.New(otgerror.CodeInput, "no sessions cannot be combined with all sessions or explicit session IDs")
+	}
+	for _, id := range selection.IDs {
+		if strings.TrimSpace(id) == "" {
+			return otgerror.New(otgerror.CodeInput, "session ID must not be blank")
+		}
+	}
+	return nil
 }
 
 type DiscoveryResult struct {
@@ -107,18 +128,18 @@ func DiscoverWithOptions(projectRoot string, roots Roots, selection Selection) (
 }
 
 func discover(projectRoot string, roots Roots, selection Selection, includeData bool) ([]discovered, []string, error) {
+	if err := ValidateSelection(selection); err != nil {
+		return nil, nil, err
+	}
+	if selection.None {
+		return nil, nil, nil
+	}
 	root, err := fsx.Canonical(projectRoot)
 	if err != nil {
 		return nil, nil, err
 	}
 	if root == string(filepath.Separator) {
-		return nil, nil, errors.New("native session project root must not be the filesystem root")
-	}
-	if selection.RecentDays < 0 {
-		return nil, nil, errors.New("session recent days must not be negative")
-	}
-	if selection.All && len(selection.IDs) > 0 {
-		return nil, nil, errors.New("all sessions and explicit session IDs are mutually exclusive")
+		return nil, nil, otgerror.New(otgerror.CodeInput, "native session project root must not be the filesystem root")
 	}
 	days := selection.RecentDays
 	if days == 0 {
@@ -127,9 +148,6 @@ func discover(projectRoot string, roots Roots, selection Selection, includeData 
 	cutoff := time.Now().AddDate(0, 0, -days)
 	requested := map[string]bool{}
 	for _, id := range selection.IDs {
-		if strings.TrimSpace(id) == "" {
-			return nil, nil, errors.New("session ID must not be blank")
-		}
 		requested[id] = false
 	}
 	var result []discovered
@@ -145,141 +163,167 @@ func discover(projectRoot string, roots Roots, selection Selection, includeData 
 		if adapter.home == "" {
 			continue
 		}
-		home, err := absolute(adapter.home)
-		if err != nil {
-			return nil, warnings, err
-		}
-		for _, dir := range adapter.dirs {
-			if err := noSymlinks(home, dir); err != nil {
-				return nil, warnings, err
+		startResult, startWarnings, startTotal := len(result), len(warnings), total
+		adapterErr := func() error {
+			home, err := absolute(adapter.home)
+			if err != nil {
+				return err
 			}
-			err := filepath.WalkDir(filepath.Join(home, dir), func(path string, entry fs.DirEntry, walkErr error) error {
-				if walkErr != nil {
-					if os.IsNotExist(walkErr) {
-						return nil
-					}
-					return walkErr
-				}
-				if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || filepath.Ext(entry.Name()) != ".jsonl" || !entry.Type().IsRegular() {
-					return nil
-				}
-				info, err := entry.Info()
-				if err != nil {
+			for _, dir := range adapter.dirs {
+				if err := noSymlinks(home, dir); err != nil {
 					return err
 				}
-				if !selection.All && len(requested) == 0 && info.ModTime().Before(cutoff) {
-					return nil
-				}
-				cached, hit := loadMetadata(path, adapter.agent, info)
-				if !hit {
-					id, cwd, err := firstMetadata(path, adapter.agent)
+				err := filepath.WalkDir(filepath.Join(home, dir), func(path string, entry fs.DirEntry, walkErr error) error {
+					if walkErr != nil {
+						if os.IsNotExist(walkErr) {
+							return nil
+						}
+						return walkErr
+					}
+					if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || filepath.Ext(entry.Name()) != ".jsonl" || !entry.Type().IsRegular() {
+						return nil
+					}
+					info, err := entry.Info()
 					if err != nil {
 						return err
 					}
-					canonicalCWD, err := fsx.Canonical(cwd)
-					if cwd == "" || err != nil || !within(canonicalCWD, root) {
+					if !selection.All && len(requested) == 0 && info.ModTime().Before(cutoff) {
 						return nil
 					}
-					if len(requested) > 0 {
-						if _, ok := requested[id]; !ok {
+					cached, hit := loadMetadata(path, adapter.agent, info)
+					if !hit {
+						id, cwd, err := firstMetadata(path, adapter.agent)
+						if err != nil {
+							return err
+						}
+						canonicalCWD, err := fsx.Canonical(cwd)
+						if cwd == "" || err != nil || !within(canonicalCWD, root) {
+							return nil
+						}
+						if len(requested) > 0 {
+							if _, ok := requested[id]; !ok {
+								return nil
+							}
+						}
+						data, err := readStable(path, MaxSessionBytes)
+						if err != nil {
+							return err
+						}
+						clean, trimmed, err := completeLines(data)
+						warning := ""
+						if trimmed {
+							warning = fmt.Sprintf("Ignored incomplete final JSONL line in %s session %s (%s).", adapter.agent, id, path)
+						}
+						if err != nil {
+							warning = fmt.Sprintf("Skipped malformed %s session %s (%s): %v", adapter.agent, id, path, err)
+						} else {
+							var validatedID, validatedCWD string
+							validatedID, validatedCWD, err = metadata(clean, adapter.agent)
+							if err != nil || id != validatedID || cwd != validatedCWD {
+								warning = fmt.Sprintf("Skipped malformed %s session %s (%s): invalid session metadata.", adapter.agent, id, path)
+								err = errors.New("invalid metadata")
+							}
+						}
+						rel, relErr := filepath.Rel(home, path)
+						if relErr != nil {
+							return relErr
+						}
+						if relErr := validatePath(adapter.agent, filepath.ToSlash(rel)); relErr != nil {
+							return relErr
+						}
+						after, statErr := os.Lstat(path)
+						if statErr != nil {
+							return statErr
+						}
+						if !stableMetadata(info, after) {
+							return otgerror.New(otgerror.CodeSourceChanged, "native session changed during discovery; stop the agent before handoff")
+						}
+						cached = cachedMetadata{info: after, session: Session{Agent: adapter.agent, ID: id, CWD: cwd, Path: filepath.ToSlash(rel), SizeBytes: int64(len(clean)), SHA256: digest(clean), LastActive: after.ModTime().UTC().Format(time.RFC3339Nano)}, warning: warning, invalid: err != nil}
+						saveMetadata(path, adapter.agent, cached)
+						if includeData && !cached.invalid { // The verified bytes are already available.
+							if cached.warning != "" {
+								warnings = append(warnings, cached.warning)
+							}
+							total += int64(len(clean))
+							if total > MaxBundleBytes {
+								return otgerror.New(otgerror.CodeSessionFormat, "native session bundle exceeds 1 GiB")
+							}
+							result = append(result, discovered{cached.session, clean})
 							return nil
 						}
 					}
-					data, err := readStable(path, MaxSessionBytes)
-					if err != nil {
-						return err
-					}
-					clean, trimmed, err := completeLines(data)
-					warning := ""
-					if trimmed {
-						warning = fmt.Sprintf("Ignored incomplete final JSONL line in %s session %s (%s).", adapter.agent, id, path)
-					}
-					if err != nil {
-						warning = fmt.Sprintf("Skipped malformed %s session %s (%s): %v", adapter.agent, id, path, err)
-					} else {
-						var validatedID, validatedCWD string
-						validatedID, validatedCWD, err = metadata(clean, adapter.agent)
-						if err != nil || id != validatedID || cwd != validatedCWD {
-							warning = fmt.Sprintf("Skipped malformed %s session %s (%s): invalid session metadata.", adapter.agent, id, path)
-							err = errors.New("invalid metadata")
-						}
-					}
-					rel, relErr := filepath.Rel(home, path)
-					if relErr != nil {
-						return relErr
-					}
-					if relErr := validatePath(adapter.agent, filepath.ToSlash(rel)); relErr != nil {
-						return relErr
-					}
-					after, statErr := os.Lstat(path)
-					if statErr != nil {
-						return statErr
-					}
-					if !stableMetadata(info, after) {
-						return errors.New("native session changed during discovery; stop the agent before handoff")
-					}
-					cached = cachedMetadata{info: after, session: Session{Agent: adapter.agent, ID: id, CWD: cwd, Path: filepath.ToSlash(rel), SizeBytes: int64(len(clean)), SHA256: digest(clean), LastActive: after.ModTime().UTC().Format(time.RFC3339Nano)}, warning: warning, invalid: err != nil}
-					saveMetadata(path, adapter.agent, cached)
-					if includeData && !cached.invalid { // The verified bytes are already available.
-						if cached.warning != "" {
-							warnings = append(warnings, cached.warning)
-						}
-						requestedMark(requested, id)
-						total += int64(len(clean))
-						if total > MaxBundleBytes {
-							return errors.New("native session bundle exceeds 1 GiB")
-						}
-						result = append(result, discovered{cached.session, clean})
+					canonicalCWD, err := fsx.Canonical(cached.session.CWD)
+					if err != nil || !within(canonicalCWD, root) {
 						return nil
 					}
-				}
-				canonicalCWD, err := fsx.Canonical(cached.session.CWD)
-				if err != nil || !within(canonicalCWD, root) {
-					return nil
-				}
-				if len(requested) > 0 {
-					if _, ok := requested[cached.session.ID]; !ok {
+					if len(requested) > 0 {
+						if _, ok := requested[cached.session.ID]; !ok {
+							return nil
+						}
+					}
+					if cached.warning != "" {
+						warnings = append(warnings, cached.warning)
+					}
+					if cached.invalid {
 						return nil
 					}
-				}
-				if cached.warning != "" {
-					warnings = append(warnings, cached.warning)
-				}
-				if cached.invalid {
+					var data []byte
+					if includeData {
+						raw, err := readStable(path, MaxSessionBytes)
+						if err != nil {
+							return err
+						}
+						data, _, err = completeLines(raw)
+						if err != nil {
+							return err
+						}
+						if digest(data) != cached.session.SHA256 {
+							return otgerror.New(otgerror.CodeSourceChanged, "native session changed after discovery; retry handoff")
+						}
+					}
+					total += cached.session.SizeBytes
+					if total > MaxBundleBytes {
+						return otgerror.New(otgerror.CodeSessionFormat, "native session bundle exceeds 1 GiB")
+					}
+					result = append(result, discovered{cached.session, data})
 					return nil
+				})
+				if err != nil {
+					return err
 				}
-				requestedMark(requested, cached.session.ID)
-				var data []byte
-				if includeData {
-					raw, err := readStable(path, MaxSessionBytes)
-					if err != nil {
-						return err
-					}
-					data, _, err = completeLines(raw)
-					if err != nil {
-						return err
-					}
-					if digest(data) != cached.session.SHA256 {
-						return errors.New("native session changed after discovery; retry handoff")
-					}
-				}
-				total += cached.session.SizeBytes
-				if total > MaxBundleBytes {
-					return errors.New("native session bundle exceeds 1 GiB")
-				}
-				result = append(result, discovered{cached.session, data})
-				return nil
-			})
-			if err != nil {
-				return nil, warnings, err
 			}
+			return nil
+		}()
+		if adapterErr != nil {
+			var typed *otgerror.Error
+			if errors.As(adapterErr, &typed) {
+				return nil, warnings, adapterErr
+			}
+			// A failed adapter contributes no histories, even if an earlier
+			// directory was readable. The other adapter remains independent.
+			result, warnings, total = result[:startResult], warnings[:startWarnings], startTotal
+			warnings = append(warnings, fmt.Sprintf("Skipped %s sessions from %s: %v", adapter.agent, adapter.home, adapterErr))
 		}
 	}
+	for _, file := range result {
+		requestedMark(requested, file.session.ID)
+	}
+	var missing []string
 	for id, found := range requested {
 		if !found {
-			warnings = append(warnings, fmt.Sprintf("Requested session %s was not found as a valid history for this project.", id))
+			missing = append(missing, id)
 		}
 	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		sort.Strings(warnings)
+		message := fmt.Sprintf("Requested sessions were not found as valid histories for this project: %s", strings.Join(missing, ", "))
+		if len(warnings) > 0 {
+			message += ". Discovery warnings: " + strings.Join(warnings, "; ")
+		}
+		return nil, warnings, otgerror.New(otgerror.CodeInput, message)
+	}
+
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].session.Agent+result[i].session.Path < result[j].session.Agent+result[j].session.Path
 	})
