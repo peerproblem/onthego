@@ -2,8 +2,7 @@ name: release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -11,16 +10,33 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - run: make check
       - run: go test -race ./...
       - run: make build
       - run: ./scripts/demo.sh
+      - run: python3 scripts/sigint-e2e.py
+      - run: python3 scripts/benchmark.py --profile smoke
+      - name: Install tested native agent versions
+        run: npm install --prefix "$RUNNER_TEMP/agent-clis" @openai/codex@0.163.0 @anthropic-ai/claude-code@2.1.301 --no-audit --no-fund
+      - name: Verify native agent resume without copied authentication or databases
+        run: python3 scripts/agent-compatibility/verify.py --codex "$RUNNER_TEMP/agent-clis/node_modules/.bin/codex" --claude "$RUNNER_TEMP/agent-clis/node_modules/.bin/claude"
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y openssh-server
+      - if: runner.os == 'Linux'
+        run: ./scripts/ssh-e2e.sh
 
   build:
     needs: test
@@ -34,16 +50,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Build CLI
+      - name: Build CLI with canonical version
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          mkdir -p dist
-          VERSION="0.2.0-dev"
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then VERSION="${GITHUB_REF_NAME}"; fi
-          go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.builtAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o "dist/onthego-${GOOS}-${GOARCH}" ./cmd/onthego
+          VERSION="0.3.0-dev"
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+          fi
+          make build VERSION="$VERSION" COMMIT="$GITHUB_SHA" BINARY="dist/onthego-${GOOS}-${GOARCH}"
           cd dist
           sha256sum "onthego-${GOOS}-${GOARCH}" > "onthego-${GOOS}-${GOARCH}.sha256"
       - uses: actions/upload-artifact@v4
@@ -76,9 +94,22 @@ jobs:
           chmod 0755 npm/bin/onthego.js npm/vendor/*
           node -e 'const fs = require("fs"); const p = require("./package.json"); p.version = process.env.GITHUB_REF_NAME.replace(/^v/, ""); fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n");'
       - run: npm pack --dry-run
-      - run: npm publish --access public --provenance
+      - name: Publish npm package
+        run: |
+          PACKAGE=$(node -p 'require("./package.json").name')
+          VERSION=$(node -p 'require("./package.json").version')
+          if [ "$(npm view "$PACKAGE@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "Package $PACKAGE@$VERSION is already published."
+          else
+            npm publish --access public --provenance
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Mark existing 0.1 releases as retired
+        run: node npm/scripts/deprecate-legacy.mjs
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
           files: artifacts/*/onthego-*

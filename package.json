@@ -1,6 +1,6 @@
 {
   "name": "@jbaehova/onthego",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Open-source workspace and coding-agent session handoffs between your own devices",
   "license": "MIT",
   "repository": {
@@ -29,7 +29,10 @@
   "scripts": {
     "demo": "./scripts/demo.sh",
     "prepack": "node npm/scripts/verify-package.mjs",
-    "test": "go test ./..."
+    "test": "go test ./...",
+    "test:e2e": "./scripts/ssh-e2e.sh",
+    "test:interrupt": "python3 scripts/sigint-e2e.py",
+    "benchmark": "python3 scripts/benchmark.py"
   },
   "publishConfig": {
     "access": "public",
