@@ -10,7 +10,7 @@ import (
 )
 
 func (a *app) inspectCommand() *cobra.Command {
-	return &cobra.Command{Use: "inspect", Args: cobra.NoArgs, Short: "Preview selected extra files and project-scoped native sessions", RunE: func(c *cobra.Command, _ []string) error {
+	return &cobra.Command{Use: "inspect", Args: cobra.NoArgs, Short: "Preview which files and agent sessions a handoff would carry", RunE: func(c *cobra.Command, _ []string) error {
 		root, cfg, err := loadProject()
 		if err != nil {
 			return err

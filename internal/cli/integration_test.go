@@ -177,6 +177,60 @@ func TestCLIIntegration(t *testing.T) {
 		assertFile(t, filepath.Join(a.root, "tracked.txt"), "desktop diverged\n")
 		assertFile(t, filepath.Join(b.root, "tracked.txt"), "laptop diverged\n")
 	})
+	t.Run("SyncChoosesDirection", func(t *testing.T) {
+		base := t.TempDir()
+		a := newMachine(t, base, "desktop", binary)
+		b := newMachine(t, base, "laptop", binary)
+		makeRepository(t, a)
+		a.mustRun(t, "init")
+		a.mustRun(t, "device", "add", "laptop", "--local-path", b.root, "--binary", b.wrapper(t))
+		direction := func(args ...string) string {
+			var plan struct {
+				Direction string `json:"direction"`
+			}
+			decodeJSON(t, a.mustRun(t, append([]string{"--json", "sync", "laptop", "--dry-run"}, args...)...), &plan)
+			return plan.Direction
+		}
+		if got := direction(); got != "push" {
+			t.Fatalf("first sync direction = %s, want push", got)
+		}
+		a.mustRun(t, "sync", "laptop")
+		assertFile(t, filepath.Join(b.root, "tracked.txt"), "original\n")
+		// Handing the workspace off makes the next sync take it back.
+		if got := direction(); got != "pull" {
+			t.Fatalf("sync after handoff = %s, want pull", got)
+		}
+		writeFixture(t, filepath.Join(b.root, "tracked.txt"), "laptop work\n")
+		a.mustRun(t, "sync", "laptop")
+		assertFile(t, filepath.Join(a.root, "tracked.txt"), "laptop work\n")
+		if got := direction(); got != "none" {
+			t.Fatalf("sync after pull = %s, want none", got)
+		}
+		if out := a.mustRun(t, "sync", "laptop"); !strings.Contains(out, "Already in sync") {
+			t.Fatalf("in-sync message missing: %s", out)
+		}
+		writeFixture(t, filepath.Join(a.root, "tracked.txt"), "desktop work\n")
+		a.mustRun(t, "sync", "laptop")
+		assertFile(t, filepath.Join(b.root, "tracked.txt"), "desktop work\n")
+		writeFixture(t, filepath.Join(a.root, "tracked.txt"), "desktop diverged\n")
+		writeFixture(t, filepath.Join(b.root, "tracked.txt"), "laptop diverged\n")
+		stdout, stderr, err := a.run(t, "sync", "laptop")
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 6 || !strings.Contains(stderr, "--replace") {
+			t.Fatalf("diverged sync = %v, stdout=%s, stderr=%s; want conflict guidance", err, stdout, stderr)
+		}
+		assertFile(t, filepath.Join(a.root, "tracked.txt"), "desktop diverged\n")
+		assertFile(t, filepath.Join(b.root, "tracked.txt"), "laptop diverged\n")
+		if out := a.mustRun(t, "device", "list"); !strings.Contains(out, b.root) {
+			t.Fatalf("device list does not show the project path: %s", out)
+		}
+		if out := a.mustRun(t, "completion", "zsh"); !strings.Contains(out, "compdef") {
+			t.Fatalf("zsh completion missing: %.200s", out)
+		}
+		if out := a.mustRun(t, "__complete", "push", ""); !strings.Contains(out, "laptop") {
+			t.Fatalf("device names are not completed: %s", out)
+		}
+	})
 	t.Run("PersistentSecretPreview", func(t *testing.T) {
 		base := t.TempDir()
 		a := newMachine(t, base, "desktop", binary)
@@ -227,14 +281,14 @@ func TestCLIIntegration(t *testing.T) {
 		makeRepository(t, a)
 		a.mustRun(t, "init")
 		a.mustRun(t, "device", "add", "laptop", "--local", "--binary", b.wrapper(t))
-		a.mustRun(t, "remote", "set", "laptop", b.root)
+		a.mustRun(t, "device", "path", "laptop", b.root)
 		a.mustRun(t, "push", "laptop")
 		secondA, secondB := a, b
 		secondA.root = filepath.Join(base, "another source")
 		secondB.root = filepath.Join(base, "another destination")
 		makeRepository(t, secondA)
 		secondA.mustRun(t, "init")
-		secondA.mustRun(t, "remote", "set", "laptop", secondB.root)
+		secondA.mustRun(t, "device", "path", "laptop", secondB.root)
 		writeFixture(t, filepath.Join(secondA.root, "second-project.txt"), "independent project mapping\n")
 		secondA.mustRun(t, "push", "laptop")
 		assertFile(t, filepath.Join(secondB.root, "second-project.txt"), "independent project mapping\n")

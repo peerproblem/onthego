@@ -11,8 +11,8 @@ import (
 )
 
 func (a *app) backupsCommand() *cobra.Command {
-	c := &cobra.Command{Use: "backups", Short: "Inspect or prune Git-object workspace backups"}
-	c.AddCommand(&cobra.Command{Use: "list", Args: cobra.NoArgs, RunE: func(c *cobra.Command, _ []string) error {
+	c := &cobra.Command{Use: "backups", Short: "List or prune the Git backups kept before each incoming handoff"}
+	c.AddCommand(&cobra.Command{Use: "list", Args: cobra.NoArgs, Short: "List workspace backups", RunE: func(c *cobra.Command, _ []string) error {
 		root, err := loadGitProject(c.Context())
 		if err != nil {
 			return err
@@ -31,7 +31,7 @@ func (a *app) backupsCommand() *cobra.Command {
 		return a.print(c, backups, strings.TrimSpace(out.String()))
 	}})
 	var keep int
-	prune := &cobra.Command{Use: "prune", Args: cobra.NoArgs, RunE: func(c *cobra.Command, _ []string) error {
+	prune := &cobra.Command{Use: "prune", Args: cobra.NoArgs, Short: "Keep only the newest backups", RunE: func(c *cobra.Command, _ []string) error {
 		if keep < 0 {
 			return otgerror.New(otgerror.CodeInput, "backup retention must be zero or greater")
 		}
@@ -49,7 +49,7 @@ func (a *app) backupsCommand() *cobra.Command {
 	return c
 }
 func (a *app) undoCommand() *cobra.Command {
-	return &cobra.Command{Use: "undo [backup-ref]", Args: cobra.MaximumNArgs(1), Short: "Restore a Git-object workspace backup in place", RunE: func(c *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "undo [backup-ref]", Args: cobra.MaximumNArgs(1), Short: "Restore the workspace as it was before the last incoming handoff", RunE: func(c *cobra.Command, args []string) error {
 		root, err := loadGitProject(c.Context())
 		if err != nil {
 			return err

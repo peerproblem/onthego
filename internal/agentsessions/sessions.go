@@ -78,10 +78,10 @@ func DefaultRoots() (Roots, error) {
 	return Roots{CodexHome: codex, ClaudeHome: claude}, nil
 }
 
-var warnings = []string{
-	"Stop agents before handoff; running processes are not transferred.",
-	"Native histories are copied in full and may contain secrets from conversation or tool output; authentication files are excluded.",
-	"Codex desktop sidebar state, SQLite databases, global history indexes, and agent settings are not transferred. Resume imported JSONL sessions with the agent CLI; compatibility depends on the installed agent version.",
+// handoffNotice is reported only when histories actually travel, so a
+// workspace-only handoff stays quiet.
+var handoffNotice = []string{
+	"Agent histories travel in full and may include secrets from prompts or tool output. Logins, databases, settings, and running agents stay on each device.",
 }
 
 // Export writes a portable manifest and full native logs to a new directory.
@@ -105,7 +105,10 @@ func ExportWithOptions(projectRoot, bundleDir string, roots Roots, selection Sel
 	if err != nil {
 		return Manifest{}, err
 	}
-	manifest := Manifest{SchemaVersion: SchemaVersion, SourceRoot: root, SourceAliases: map[string]string{}, Sessions: []Session{}, Warnings: append(append([]string(nil), warnings...), discoveryWarnings...)}
+	manifest := Manifest{SchemaVersion: SchemaVersion, SourceRoot: root, SourceAliases: map[string]string{}, Sessions: []Session{}, Warnings: append([]string(nil), discoveryWarnings...)}
+	if len(files) > 0 {
+		manifest.Warnings = append(append([]string(nil), handoffNotice...), discoveryWarnings...)
+	}
 	if _, err := os.Lstat(bundleDir); err == nil {
 		return Manifest{}, errors.New("native session export directory already exists")
 	} else if !os.IsNotExist(err) {
@@ -179,8 +182,12 @@ func planImportManifest(bundleDir, projectRoot string, roots Roots, options Impo
 	if err != nil {
 		return nil, ImportResult{}, err
 	}
-	result := ImportResult{Warnings: append([]string(nil), warnings...)}
-	for _, warning := range manifest.Warnings {
+	result := ImportResult{}
+	incomingWarnings := manifest.Warnings
+	if len(manifest.Sessions) > 0 {
+		incomingWarnings = append(append([]string(nil), handoffNotice...), manifest.Warnings...)
+	}
+	for _, warning := range incomingWarnings {
 		duplicate := false
 		for _, existing := range result.Warnings {
 			if existing == warning {

@@ -5,6 +5,7 @@ Linux with root or passwordless sudo creates and removes a dedicated account.
 Other hosts try an unprivileged sshd as the current user, with isolated keys,
 known-hosts, configuration and ONTHEGO/agent homes. No running SSH service is used.
 """
+import json
 import os
 from pathlib import Path
 import pwd
@@ -134,7 +135,24 @@ LogLevel ERROR
             run([cli, 'pull', 'loopback'], cwd=source, env=local_env)
             if (source / 'draft.txt').read_text() != 'untracked\nremote edit\n':
                 raise AssertionError('SSH pull did not return the remote edit')
-            print('PASS: real OpenSSH pairing, push, remote edit and pull with isolated identities and agent homes.')
+            message = 'PASS: real OpenSSH pairing, push, remote edit and pull with isolated identities and agent homes.'
+            if temporary_user:
+                # The dedicated account has an isolated HOME, so --install can
+                # write ~/.local/bin there without touching a real home.
+                installed_target = base / 'remote' / 'installed-project'
+                run([cli, 'device', 'add', 'installed', '--host', f'{username}@127.0.0.1', '--port', port,
+                     '--identity-file', base / 'client_key', '--path', installed_target, '--install'], cwd=source, env=local_env)
+                listed = json.loads(run([cli, '--json', 'device', 'list'], cwd=source, env=local_env))
+                expected = str(Path(remote_env['HOME']) / '.local' / 'bin' / 'onthego')
+                if listed['installed']['binary'] != expected:
+                    raise AssertionError(f'--install saved {listed["installed"]["binary"]}, want {expected}')
+                run([cli, 'sync', 'installed'], cwd=source, env=local_env)
+                if run(ssh_args + [f'cat {shlex.quote(str(installed_target / "draft.txt"))}']) != 'untracked\nremote edit':
+                    raise AssertionError('sync to an installed device did not deliver the workspace')
+                run([cli, 'device', 'install', 'installed'], cwd=source, env=local_env)
+                run([cli, 'doctor', 'installed'], cwd=source, env=local_env)
+                message += ' Installed the CLI over SSH and synced to it.'
+            print(message)
         finally:
             if server is not None and server.poll() is None:
                 if privilege:

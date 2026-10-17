@@ -1,117 +1,176 @@
 # ONTHEGO
 
-Continue your coding-agent conversation on another device, with your unfinished Git workspace intact.
+Move your unfinished work and your coding-agent conversations between your desktop, laptop, and VPS with one command.
 
-ONTHEGO is an MIT-licensed CLI for explicit handoffs between your own computers. It carries staged and unstaged work together with project-scoped Codex CLI and Claude Code histories. Each destination keeps its Git settings, hooks, local dependencies, and editor directory intact.
+```sh
+onthego sync laptop
+```
 
-No ONTHEGO account or central server is needed. SSH connects your devices. Install and authenticate the coding agent separately on each device. This project targets individual CLI users.
+ONTHEGO carries a Git project exactly as you left it: staged, unstaged, and untracked work, plus the project's Codex CLI and Claude Code sessions, so you can `codex resume` or `claude --resume` on the other device and keep going. Each device keeps its own Git settings, hooks, `node_modules`, caches, and agent logins.
+
+It is a small open-source CLI (MIT). There is no account, no hosted service, and no AI feature. Your devices talk to each other directly over SSH, optionally through [Tailscale](#anywhere-with-tailscale).
 
 ## Install
 
 ```sh
-npm install -g @jbaehova/onthego@^0.3.1
+npm install -g @jbaehova/onthego
 ```
 
-The npm package includes binaries for macOS arm64/amd64 and Linux arm64/amd64. Git and OpenSSH are required. Node.js is needed only for the npm launcher. Install the same ONTHEGO version on both devices.
+The npm package ships native binaries for macOS and Linux (arm64 and amd64). Git and OpenSSH are required; Node.js is only needed for npm itself.
 
-You can also build from source with Go 1.26 or newer (the build selects Go 1.27.2):
+On a server without Node.js:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/peerproblem/onthego/main/install.sh | sh
+```
+
+The script downloads the release binary for the machine, verifies its SHA-256 checksum, and installs it to `~/.local/bin`. Pass `-s -- --version 0.4.0` for a specific version.
+
+You usually do not need to install it on the other devices by hand: `onthego device add <name> --install` copies the exact same version over SSH.
+
+<details>
+<summary>Build from source</summary>
 
 ```sh
 git clone https://github.com/peerproblem/onthego.git
 cd onthego
-make build
-mkdir -p ~/.local/bin
+make build            # Go 1.26 or newer
 install -m 755 dist/onthego ~/.local/bin/onthego
-# Or: go install github.com/peerproblem/onthego/cmd/onthego@latest
 ```
 
-## Desktop to laptop
+</details>
 
-Enable SSH on the destination and establish a trusted SSH connection first. An existing SSH alias can use a LAN address or your own VPS. Tailscale and other VPNs are optional ways to provide reachability. Both devices must be reachable during a direct transfer.
+## Quick start
 
-Inside the project on the desktop:
+On your desktop, inside a Git project:
 
 ```sh
-onthego init
-onthego device add laptop --host me@my-laptop
-onthego remote set laptop /Users/me/projects/my-app
-onthego doctor laptop
-onthego push laptop --dry-run
-
-# Stop agents and other processes that write project files, then:
-onthego push laptop --verbose
+onthego init                                      # once per project; commit .onthego.yaml
+onthego device add laptop --host me@laptop.local --install
+onthego sync laptop
 ```
 
-`device add` pairs both public identities through your trusted SSH connection. It discovers the remote executable using a login shell. Use `--binary /absolute/path/onthego` when needed. `--port` and `--identity-file` select an existing SSH connection; private SSH keys are never copied.
-
-Devices store hosts and identities once. Project paths are separate mappings under `~/.onthego/projects/<id>/peers.yaml`. Without a mapping, the path relative to your home directory is used under the remote home. `device add ... --path ...` remains a shortcut for the current project's mapping.
-
-For the first transfer, choose a destination directory that does not exist. On the laptop:
+Then on the laptop:
 
 ```sh
-cd /Users/me/projects/my-app
-onthego status
-codex resume <session-id>
-# Or: claude --resume <session-id>
+cd ~/projects/my-app                              # the same home-relative path by default
+codex resume <session-id>                         # or: claude --resume <session-id>
 ```
 
-Use the session ID printed by the handoff. These commands resume a native history, not a running process. See the exact tested CLI versions and validation boundaries in [agent compatibility](docs/agent-compatibility.md).
+The handoff prints the exact `cd` and resume commands. When you are back at the desktop, run `onthego sync laptop` again: the desktop knows it handed the work off, so it pulls the laptop's changes back.
 
-To bring laptop changes back, run this from the desktop project:
+`sync` picks the direction for you:
+
+| Situation | What `sync` does |
+| --- | --- |
+| The project is not on the other device yet | push |
+| Only this device changed since the last handoff | push |
+| Only the other device changed | pull |
+| You handed the work off and have not touched it since | pull (take it back) |
+| Nothing changed | nothing |
+| Both sides changed | stops, and tells you to choose `push --replace` or `pull --replace` |
+
+Nothing is ever merged silently. Whenever a handoff replaces work, the replaced state is kept as a Git backup that `onthego undo` restores. Use `onthego sync laptop --dry-run` to see the decision first, or `push` and `pull` to choose the direction yourself.
+
+## Connecting your devices
+
+ONTHEGO uses your normal SSH setup (`~/.ssh/config`, keys, `known_hosts`). The only requirement is that one device can `ssh` into the other without a password prompt. **Run every command from the device that can reach the other one.** A laptop that can reach a VPS can both push to it and pull from it, so the VPS never needs to reach the laptop.
+
+`onthego doctor laptop` checks the whole chain: SSH, the remote onthego version, and the pinned identity.
+
+### Same network
+
+1. Enable SSH on the receiving device.
+   - macOS: System Settings > General > Sharing > Remote Login.
+   - Linux: `sudo systemctl enable --now ssh`
+2. From the device you type on, install your key and accept the host key once:
+
+   ```sh
+   ssh-copy-id me@laptop.local
+   ssh me@laptop.local true
+   ```
+
+3. Pair it: `onthego device add laptop --host me@laptop.local --install`
+
+An alias from `~/.ssh/config` works as the host too (`--host laptop`). `--port` and `--identity-file` are available; private keys are never copied.
+
+### Anywhere with Tailscale
+
+Use Tailscale when your devices are not on the same network, for example a laptop on the road and a desktop at home. Tailscale gives every device a stable name; ONTHEGO looks it up for you.
+
+1. Install Tailscale on each device and sign in with the same account ([download](https://tailscale.com/download); on Linux: `curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up`).
+2. Enable SSH on each device you pair to, as above. On Linux you can instead turn on Tailscale SSH with `sudo tailscale set --ssh`.
+3. List your tailnet and pair by name:
+
+   ```sh
+   onthego tailscale
+   onthego device add laptop --tailscale me@laptop --install
+   ```
+
+`onthego tailscale` shows which devices are online, which are already paired, and what is missing. ONTHEGO only reads `tailscale status`; it never changes Tailscale settings. See the [Tailscale guide](docs/tailscale.md) for MagicDNS, Tailscale SSH "check" mode, and troubleshooting.
+
+### A VPS
 
 ```sh
-onthego pull laptop --verbose
+onthego device add vps --host me@vps.example.com --install
+onthego sync vps
 ```
 
-The destination is updated in place. Existing shells, editor watchers, and local dependency directories continue to refer to the same project directory. Stop writers during the transfer so they cannot race with capture or application.
+`--install` detects the server's OS and CPU and copies the matching binary to `~/.local/bin/onthego` there. No Node.js or internet access is needed on the server. After you upgrade onthego locally, run `onthego device install vps` to upgrade the server to the same version.
 
-After a successful push, `status` warns that the project and sessions were handed to the other device. Pull before editing or resuming them on the original device.
+Work on the VPS over SSH or in a terminal multiplexer as usual. When you come back, run `onthego sync vps` from your laptop or desktop.
+
+### Where the project lives on each device
+
+By default the project goes to the same path relative to the home directory (`~/projects/my-app` on macOS becomes `/home/me/projects/my-app` on Linux). Agent session paths are remapped to match. To choose another location:
+
+```sh
+onthego device path laptop /Users/me/code/my-app
+onthego device list                               # shows each device and this project's path there
+```
+
+For the first transfer, the destination directory should not exist yet. To adopt an existing copy, use `push --replace` once (a Git backup of the destination is kept).
 
 ## What moves
 
 | Data | Behavior |
 | --- | --- |
-| Git history | Missing objects travel in a negotiated bundle. GitHub is optional. |
-| Staged and unstaged work | Temporary Git trees preserve their distinction, binary content, and executable bits. |
-| Untracked project files | Included subject to project exclusions and the secret policy. |
-| Ignored files | Include explicitly with `--include` or project policy. |
-| Secret candidates such as `.env` | Excluded and reported; eligible files require `--include-secret`. |
-| Codex and Claude histories | Recent project sessions by default; path values are remapped without rewriting conversation content. |
-| Destination Git configuration and hooks | Preserved in place, together with remotes, reflogs, and existing stashes. |
-| Destination caches and local dependencies | Left in place when they are outside the managed file set. |
-| Agent logins, global databases, and running processes | Not transferred. Authenticate and run the agent separately on each device. |
+| Git history | Only missing objects travel, in an incremental bundle. No Git hosting needed. |
+| Staged and unstaged work | Preserved separately, including binary files and executable bits. |
+| Untracked files | Included, subject to `exclude` rules and the secret policy. |
+| Ignored files | Only when you add them with `--include` or project policy. |
+| Secret candidates such as `.env`, `.npmrc` | Excluded and reported. `--include-secret` carries a file encrypted, outside Git objects. |
+| Codex and Claude sessions | Sessions for this project active in the last 7 days. Paths are remapped; conversation content is not rewritten. |
+| Destination Git config, hooks, remotes, stashes | Left as they are. |
+| `node_modules`, caches, build output | Left as they are on each device. |
+| Agent logins, global databases, running processes | Never transferred. Sign in to the agent on each device. |
 
-Native transcripts may contain sensitive prompts or tool output. ONTHEGO preserves them inside an encrypted package for resumability. All tracked Git content and history also travel as recorded, including anything previously committed. Supplemental secret-file rules cannot remove secrets from Git history.
+Everything travels in one package that is encrypted for the receiving device (age) and signed by the sender (Ed25519). Pairing pins both identities, so a device that changes keys is rejected.
 
-## Sessions and conflicts
+Stop agents and other processes that write to the project before a handoff, so they cannot race with it. Agent transcripts can contain sensitive prompts or tool output; they are encrypted in transit and stored as the agent would store them. Anything already committed to Git travels as recorded, including secrets in history.
 
-The default selection is sessions active in the last seven days. Choose a narrower or broader set explicitly:
+## Day to day
 
 ```sh
-onthego push laptop --session <id>
+onthego status                     # did anything change since the last handoff? who has the work?
+onthego status laptop              # the same, for the laptop's copy
+onthego push laptop --dry-run      # preview files and sessions without sending
 onthego push laptop --session-days 2
-onthego push laptop --all-sessions
-onthego pull laptop --no-sessions
-onthego pull laptop --session-conflict skip
+onthego push laptop --session <id> # or --all-sessions, --no-sessions
+onthego push laptop --include scratch/notes.txt --include-secret .env
 ```
 
-Malformed completed JSONL lines exclude that session with a warning. An incomplete final line is discarded with a warning. These histories do not stop the workspace handoff. An explicitly requested ID that cannot be found fails before packaging. `--no-sessions` skips session discovery and leaves receiving agent homes untouched.
+After a push, `status` on the sending device reminds you that the work was handed to the other device. Pull (or `sync`) before editing there again.
 
-Identical sessions are skipped. Incoming extensions update an older destination, while a newer destination is kept. Divergent sessions keep the destination and save the incoming history in private `~/.onthego/conflicts/` storage by default. `--session-conflict keep-both`, `--session-conflict theirs`, and `--session-conflict skip` make the policy explicit. Conflict copies remain until you review and remove them. Plaintext staging copies are removed after import. If an adapter cannot write its destination, the workspace still arrives and its authenticated inbound histories are retained in a private `session-recovery-*` directory under ONTHEGO state. The warning prints its location. `status` reports pending recovery. Retry the same package or run `onthego sessions recover --session-conflict keep-both` to import only the saved sessions while preserving subsequent workspace edits. JSON reports `sessions.status: "recovery_needed"` until recovery succeeds. The deprecated `--sessions` alias still works and warns; it only chooses a conflict policy.
+### Conflicts and recovery
 
-Concurrent workspace edits require a deliberate decision. ONTHEGO checks Git handoff ancestry and the destination's captured workspace state. `--replace` applies incoming managed files after retaining a Git backup; a different project ID is always rejected.
-
-```sh
-onthego backups list
-onthego undo
-onthego backups prune --keep 3
-```
-
-The newest five Git backups are retained automatically. Explicitly included supplemental secrets stay outside Git objects; their backup contents are encrypted under the private ONTHEGO state directory. Unmanaged `node_modules`, caches, and local environment files are not copied into backups. Undo restores the backed-up managed state and clears the delivery baseline, since restoring old work does not prove that another device has received it. Backup listing, pruning and undo remain available even if `.onthego.yaml` is missing or invalid. Use Git to reconcile intentional concurrent development.
+- **Workspace.** When both devices changed, `sync`, `push`, and `pull` stop with exit code 6. `--replace` overwrites the other side after saving a Git backup there. `onthego backups list` shows backups, `onthego undo` restores the latest one, and `onthego backups prune --keep 3` trims them. The newest five are kept automatically.
+- **Agent sessions.** Identical sessions are skipped and a longer incoming history updates an older one. A diverged session keeps the destination's copy and saves the incoming one under `~/.onthego/conflicts/`. Change this with `--session-conflict keep-both|theirs|skip`.
+- **Partial delivery.** If the workspace arrives but an agent home cannot be written, the sessions are kept privately and `status` says so. Run `onthego sessions recover` once the problem is fixed; later workspace edits are preserved.
 
 ## Configuration
 
-Commit the project policy `.onthego.yaml`:
+`onthego init` writes `.onthego.yaml`. Commit it so every device uses the same project ID:
 
 ```yaml
 schema_version: 2
@@ -127,92 +186,74 @@ exclude:
   - build
   - .cache
   - __pycache__
-agent: auto
+agent: auto        # auto, codex, claude, or none (workspace only)
 ```
 
-`agent` accepts `auto`, `codex`, `claude`, or `none`. `none` performs workspace-only handoffs.
+Paths passed with `--include` or `--include-secret` stay managed in later handoffs, including deletions. Adding a managed file to `exclude` stops sending it and leaves the receiving copy in place with a warning.
 
-Personal configuration and pinned identities live in `~/.onthego/config.yaml`. Private ONTHEGO keys live in `~/.onthego/identity/keys.json`. Private directories use mode `0700` and files use `0600`. `ONTHEGO_HOME` optionally selects a different state directory. ONTHEGO never automatically loads `.env` files.
+Private state lives in `~/.onthego` (or `$ONTHEGO_HOME`), with `0700` directories and `0600` files: paired devices in `config.yaml`, keys in `identity/`, and per-project paths under `projects/`. ONTHEGO never loads `.env` files.
+
+Shell completion, including device names:
 
 ```sh
-onthego config path
-onthego device list
-onthego identity
-onthego push laptop --include scratch/notes.txt
-onthego push laptop --include-secret .env
+onthego completion zsh > "${fpath[1]}/_onthego"   # also: bash, fish
 ```
 
-Explicitly selected files remain managed across subsequent handoffs, including deletions. Do not opt in credentials that must stay device-local. Adding a managed supplemental file to `exclude` stops future transfer and leaves the receiving copy in place with a warning. Source deletions still propagate. Project exclusions override previously remembered secret selections; explicitly combining an excluded path with `--include-secret` fails.
+## Offline handoff
 
-Credential filenames such as `.npmrc` and `.netrc` are excluded from automatic selection. `--include-secret .npmrc` carries an allowed file in the encrypted supplemental payload, outside Git objects. Names such as `tokenizer.ts`, `docs-secret-santa.md`, and `design.key` are ordinary project files, not secret candidates.
-
-## Portable snapshots
-
-For removable storage or another delivery channel, create an encrypted `.otg` file:
+Without a network path, hand off through an encrypted file on a USB drive or any other channel:
 
 ```sh
-onthego snapshot pack --output /tmp/project.otg --recipient age1...
+onthego identity                                   # on the receiving device: prints its public keys
+onthego snapshot pack --output /tmp/my-app.otg --recipient age1...
 
 # On the receiving device:
-onthego snapshot restore /tmp/project.otg \
-  --output /path/to/project \
-  --signing-public <trusted-source-public-key>
+onthego snapshot restore /tmp/my-app.otg --output ~/projects/my-app --signing-public <sender-signing-key>
 ```
-
-Use the recipient and signing public keys printed by `onthego identity`. Without `--recipient`, packing targets the local device. SSH handoffs resolve both identities from pairing; offline restores require you to authenticate the source signing key.
-
-Offline exports retain pending receipts for up to 30 days, bounded to 64 per workspace. A returning descendant can acknowledge this lineage without `--replace`. Retrying an already applied snapshot succeeds without overwriting later local edits.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `init` | Initialize project policy. |
-| `device add/list/remove` | Pair and manage devices. |
-| `remote set` | Manage project paths on those devices. |
-| `push`, `pull` | Hand off a workspace and selected histories. |
-| `status [device]` | Inspect changes and active-device guidance. |
-| `inspect` | Preview file selection and excluded secret candidates. |
-| `doctor [device]` | Check prerequisites, CLI versions, and optional peer access. |
-| `snapshot pack/restore` | Create or receive an offline package. |
-| `sessions recover` | Retry saved native histories without changing the workspace. |
-| `backups list/prune`, `undo` | Inspect, limit, or restore Git backups. |
-| `identity`, `config path`, `version` | Inspect public identity and installation. |
+| `sync <device>` | Push or pull, whichever brings both devices up to date. |
+| `push <device>`, `pull <device>` | Hand off in an explicit direction. |
+| `status [device]` | Show changes since the last handoff and who has the work. |
+| `inspect` | Preview selected files, excluded secrets, and sessions. |
+| `init` | Set up the current Git project. |
+| `device add/list/path/install/remove` | Pair devices, map project paths, install or upgrade onthego on them. |
+| `tailscale` | Check Tailscale and list tailnet devices to pair. |
+| `doctor [device]` | Check Git, SSH, Tailscale, agents, and a device connection. |
+| `undo`, `backups list/prune` | Restore or manage workspace backups. |
+| `sessions recover` | Retry an agent session import after a partial handoff. |
+| `snapshot pack/restore` | Offline handoff through an encrypted file. |
+| `identity`, `config path`, `completion`, `version` | Keys, settings location, shell completion, build info. |
 
-Text output escapes control characters in filenames and session IDs. Suggested commands for these unusual names use Bash/Zsh quoting. `--json` emits structured results and errors. `--verbose` reports transfer phases on stderr. Dry-run validates local options and previews files plus selected sessions. Its `not_checked` field lists `peer` and `destination_conflict`.
+`--json` prints structured results and errors, `--verbose` prints transfer phases on stderr.
 
-| Exit status | Public error codes |
+| Exit status | Meaning |
 | --- | --- |
-| 0 | Success, including delivered workspaces with pending session recovery |
+| 0 | Success (including a delivered workspace with pending session recovery) |
 | 1 | `E_INTERNAL` |
 | 2 | `E_INPUT` |
 | 3 | `E_PRECONDITION`, `E_UNSUPPORTED_GIT`, `E_SECRET_POLICY`, `E_SESSION_FORMAT` |
-| 4 | `E_TARGET_AUTH`, `E_TARGET_UNAVAILABLE` |
+| 4 | `E_TARGET_AUTH`, `E_TARGET_UNAVAILABLE` (SSH login, host key, or reachability) |
 | 5 | `E_PACKAGE_INVALID`, `E_RESTORE_FAILED` |
 | 6 | `E_GENERATION_CONFLICT`, `E_SOURCE_CHANGED` |
 | 130 | `E_CANCELED` |
 
-## Upgrading to 0.3.1
+## Upgrading
 
-Upgrade both devices together. Snapshot schema 3 adds signed `retained_paths` and `payload_sizes`; 0.3.1 reads schema 2 and 3, while older receivers reject schema 3. Peer transfers require the `snapshot-v3` and `session-scope` capabilities. Project policy and handoff receipt schemas remain 2; session recovery uses a separate state file.
+0.4 keeps the 0.3.1 wire protocol and file formats, so a 0.4 device can hand off with a 0.3.1 device. Keeping every device on the same version is still the simplest: after `npm update -g @jbaehova/onthego`, run `onthego device install <name>` for each SSH device. `onthego remote set` still works but is replaced by `onthego device path`. See the [release notes](docs/releases/0.4.0.md) and [migration notes](docs/migration.md).
 
-If you transferred an untracked credential file such as `.npmrc` with 0.3.0 or earlier, rotate its tokens. Those bytes can remain in the source and receiving repositories' Git objects through retained WIP history. This update prevents new automatic capture but does not remove existing objects; Git garbage collection alone does not remove referenced history. See the [0.3.1 release notes](docs/releases/0.3.1.md).
+## More
 
-## Development
+- [Tailscale guide](docs/tailscale.md)
+- [Agent compatibility](docs/agent-compatibility.md): tested Codex and Claude Code versions and how resume is verified.
+- [Architecture](docs/architecture.md): how capture, encryption, in-place application, and receipts work.
+- [Development](docs/development.md): tests, demos, end-to-end checks, and benchmarks.
 
-```sh
-make check
-go test -race ./...
-make build
-./scripts/demo.sh
-./scripts/ssh-e2e.sh
-make package
-```
-
-The tests and demos isolate project and agent homes. The SSH script uses a real temporary OpenSSH server. See [validation and feedback coverage](docs/progress.md), [architecture](docs/architecture.md), and [migration](docs/migration.md).
-
-This is an explicit handoff tool. Continuous synchronization and user-owned asynchronous storage adapters remain future work.
+Continuous background synchronization is intentionally out of scope: handoffs are explicit, so you always know which device has the work.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE)

@@ -1,7 +1,7 @@
 BINARY := dist/onthego
 GO ?= go
 GOFMT ?= gofmt
-VERSION ?= 0.3.1
+VERSION ?= 0.4.0
 # npm, GitHub artifacts and --version use one canonical version without a tag prefix.
 BUILD_VERSION := $(patsubst v%,%,$(VERSION))
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
