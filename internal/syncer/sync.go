@@ -175,7 +175,7 @@ func ExportWithOptions(ctx context.Context, root, output, recipient, version str
 	warnings = append(warnings, after.Warnings...)
 	warnings = append(warnings, policyWarnings(cfg, previous)...)
 	for _, path := range created.ExcludedFiles {
-		warnings = append(warnings, "Secret candidate not transferred: "+path)
+		warnings = append(warnings, "Secret candidate not transferred: "+path+" (use --include-secret "+path+" to carry it encrypted)")
 	}
 	return ExportResult{Manifest: created.Manifest, Warnings: unique(warnings)}, nil
 }

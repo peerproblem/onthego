@@ -2,6 +2,8 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/peerproblem/onthego/internal/agentsessions"
@@ -32,9 +34,12 @@ func renderTransfer(action string, r syncer.Result) string {
 			seenWarnings[warning] = true
 		}
 	}
-	root := terminalShellArgument(r.Root)
-	msg += "\nContinue in the receiving workspace: cd " + root
-	msg += fmt.Sprintf("\nAgent histories: %d imported, %d updated, %d unchanged.", r.Sessions.Imported, r.Sessions.Updated, r.Sessions.Skipped)
+	if !isWorkingDirectory(r.Root) {
+		msg += "\nContinue there: cd " + terminalShellArgument(r.Root)
+	}
+	if r.Sessions.Imported+r.Sessions.Updated+r.Sessions.Skipped > 0 || len(r.Sessions.Sessions) > 0 {
+		msg += fmt.Sprintf("\nAgent histories: %d imported, %d updated, %d unchanged.", r.Sessions.Imported, r.Sessions.Updated, r.Sessions.Skipped)
+	}
 	for _, file := range r.Manifest.Files {
 		if file.Secret {
 			msg += "\nManaged secret file: " + terminalValue(file.RelativePath) + " (included in subsequent handoffs)"
@@ -54,10 +59,19 @@ func renderTransfer(action string, r syncer.Result) string {
 			msg += "\nResume: claude --resume " + id
 		}
 	}
-	if len(r.Sessions.Sessions) > 0 {
-		msg += "\nRun resume commands from the receiving project."
-	}
 	return msg
+}
+
+// isWorkingDirectory hides the "cd" hint when the handoff landed where the
+// user already is.
+func isWorkingDirectory(root string) bool {
+	wd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	a, errA := filepath.EvalSymlinks(wd)
+	b, errB := filepath.EvalSymlinks(root)
+	return errA == nil && errB == nil && a == b
 }
 func renderPreview(files []capture.PreviewFile, destination string) string {
 	var out strings.Builder

@@ -38,7 +38,7 @@ func TestExportTrimsOnlyIncompleteTailAndSkipsMalformedSession(t *testing.T) {
 	if err != nil || len(manifest.Sessions) != 2 {
 		t.Fatalf("export: %#v %v", manifest, err)
 	}
-	if len(manifest.Warnings) != len(warnings)+2 {
+	if len(manifest.Warnings) != len(handoffNotice)+2 {
 		t.Fatalf("missing explicit corruption warnings: %#v", manifest.Warnings)
 	}
 	if got := readTest(t, filepath.Join(bundle, "codex", "sessions", "truncated.jsonl")); got != prefix {
