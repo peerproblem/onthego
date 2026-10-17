@@ -4,510 +4,435 @@
 <meta charset="utf-8">
 <script>document.documentElement.classList.add("js")</script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>onthego: your work, on every device</title>
-<meta name="description" content="Move an unfinished Git workspace and its Codex and Claude Code sessions between your desktop, laptop, and VPS with one command. Open source, no account, no server.">
-<meta property="og:title" content="onthego: your work, on every device">
-<meta property="og:description" content="Move unfinished work and coding-agent sessions between your own devices with one command.">
+<title>onthego: start at your desk, finish anywhere</title>
+<meta name="description" content="Hand off an unfinished Git workspace and its Codex and Claude Code sessions between your desktop, laptop, and VPS with one command. Open source, no account, no server.">
+<meta property="og:title" content="onthego: start at your desk, finish anywhere">
+<meta property="og:description" content="Hand off unfinished work and coding-agent sessions between your own devices with one command.">
 <meta property="og:image" content="https://peerproblem.github.io/onthego/og.png">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root {
-  --ink: #2f343b;
-  --ink-2: #474f5b;
-  --muted: #6c7582;
-  --faint: #9aa3af;
-  --line: #e6e9ee;
-  --line-2: #eef1f5;
-  --bg: #ffffff;
-  --bg-soft: #f7f9fc;
-  --blue: #406ba6;
-  --blue-ink: #245485;
-  --blue-soft: #e5f0fd;
-  --blue-line: #cfe0f6;
-  --green: #2c7a3f;
-  --red: #b4372f;
-  --codex: #1f2328;
-  --claude: #c8623f;
-  --laptop: #6a4fd1;
-  --vps: #137a6f;
-  --radius: 14px;
-  --shadow: 0 1px 2px rgba(31, 41, 55, .04), 0 8px 24px rgba(31, 41, 55, .06);
-  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
-  --display: "Inter Tight", var(--sans);
-  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --paper: #fbfbf9;
+  --card: #ffffff;
+  --ink: #1c2230;
+  --ink-2: #3d4554;
+  --muted: #6b7280;
+  --faint: #a1a7b0;
+  --rule: #e7e7e2;
+  --rule-2: #f0f0ec;
+  --sea: #2f5fa7;
+  --sea-soft: #edf3fb;
+  --apricot: #e0894f;
+  --apricot-soft: #fbefe5;
+  --moss: #3d7a4e;
+  --brick: #b54a3c;
+  --serif: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Noto Sans KR", "Segoe UI", Helvetica, Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
-body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.62 var(--sans); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
-a { color: inherit; text-decoration: none; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.65 var(--sans); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
 html:lang(ko) body { word-break: keep-all; overflow-wrap: break-word; }
-code, pre, kbd { font-family: var(--mono); }
-.wrap { width: min(1120px, 100% - 32px); margin: 0 auto; }
-.narrow { width: min(760px, 100% - 32px); margin: 0 auto; }
+a { color: inherit; }
+.wrap { width: min(1140px, 100% - 40px); margin: 0 auto; }
+@media (max-width: 520px) { .wrap { width: calc(100% - 32px); } }
+.label { font: 500 12px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 10px; }
+.label::before { content: ""; width: 18px; height: 1px; background: currentColor; opacity: .6; }
+h1, h2 { font-family: var(--serif); font-weight: 400; letter-spacing: -.01em; text-wrap: balance; margin: 0; }
+h1 i, h2 i { color: var(--sea); }
+html:lang(ko) h1, html:lang(ko) h2 { font-family: var(--sans); font-weight: 700; letter-spacing: -.035em; }
+html:lang(ko) h1 i, html:lang(ko) h2 i { font-style: normal; }
+p { text-wrap: pretty; }
+code { font-family: var(--mono); font-size: .92em; }
 
-/* nav */
-.nav { position: sticky; top: 0; z-index: 20; background: rgba(255,255,255,.82); backdrop-filter: saturate(1.4) blur(12px); -webkit-backdrop-filter: saturate(1.4) blur(12px); border-bottom: 1px solid transparent; transition: border-color .2s; }
-.nav.scrolled { border-bottom-color: var(--line); }
-.nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; gap: 16px; }
-.brand { display: inline-flex; align-items: center; gap: 10px; font: 700 21px/1 var(--display); letter-spacing: -.03em; }
-.brand svg { width: 26px; height: 26px; }
-.nav-links { display: flex; align-items: center; gap: 26px; font-size: 14px; color: var(--ink-2); }
-.nav-links a:hover { color: var(--ink); }
-.lang { appearance: none; border: 0; background: transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236c7582' stroke-width='1.4'/%3E%3C/svg%3E") no-repeat right 2px center; padding: 4px 18px 4px 4px; font: inherit; color: var(--muted); cursor: pointer; }
-.pill { display: inline-flex; align-items: center; gap: 8px; border-radius: 999px; font-weight: 600; font-size: 14px; padding: 9px 16px; transition: background .15s, border-color .15s, transform .15s; white-space: nowrap; cursor: pointer; border: 1px solid transparent; font-family: inherit; }
-.pill.primary { background: var(--blue-soft); color: var(--blue-ink); }
-.pill.primary:hover { background: #d8e8fc; }
-.pill.ghost { background: #fff; border-color: var(--line); color: var(--ink); }
-.pill.ghost:hover { border-color: #d3d8e0; }
-.pill.sm { font-size: 13px; padding: 7px 14px; }
-.pill svg { width: 13px; height: 13px; }
-@media (max-width: 760px) { .nav-links .hide-sm { display: none; } .nav-links { gap: 14px; } }
+/* top bar */
+.top { position: sticky; top: 0; z-index: 30; background: rgba(251,251,249,.86); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid transparent; transition: border-color .2s; }
+.top.line { border-bottom-color: var(--rule); }
+.top .wrap { height: 60px; display: flex; align-items: center; gap: 28px; }
+.logo { display: inline-flex; align-items: center; gap: 9px; text-decoration: none; font: 600 17px/1 var(--sans); letter-spacing: -.02em; }
+.logo svg { width: 24px; height: 24px; }
+.top nav { margin-left: auto; display: flex; align-items: center; gap: 24px; font-size: 14px; color: var(--ink-2); }
+.top nav a { text-decoration: none; }
+.top nav a:hover { color: var(--ink); }
+.langs { display: inline-flex; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.langs button { border: 0; background: transparent; font: 500 12px/1 var(--mono); padding: 7px 9px; color: var(--muted); cursor: pointer; }
+.langs button[aria-pressed="true"] { background: var(--ink); color: #fff; }
+@media (max-width: 720px) { .top nav .opt { display: none; } }
 
 /* hero */
-.hero { position: relative; text-align: center; padding: 36px 0 88px; overflow: hidden; }
-.mark { position: relative; height: clamp(150px, 26vw, 300px); margin: 0 auto; user-select: none; }
-.mark .w { position: absolute; left: 50%; transform: translateX(-50%); font: 800 clamp(86px, 17vw, 210px)/1 var(--display); letter-spacing: -.055em; white-space: nowrap; }
-.mark .solid { top: 50%; transform: translate(-50%, -54%); color: var(--blue); }
-.mark .ghost { color: transparent; -webkit-text-stroke: 1.5px #e8ecf1; }
-.mark .ghost.up { top: -62%; clip-path: inset(55% 0 0 0); }
-.mark .ghost.down { top: 64%; clip-path: inset(0 0 52% 0); }
-.chip { position: absolute; z-index: 2; display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px 5px 9px; border-radius: 999px; color: #fff; font: 600 13px/1.2 var(--sans); box-shadow: 0 4px 14px rgba(31,41,55,.14); animation: drift 7s ease-in-out infinite; }
-.chip::before { content: ""; position: absolute; width: 12px; height: 14px; left: -12px; top: -14px; background: currentColor; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 14'%3E%3Cpath d='M1 1l10 5-4.4 1.4L4.6 12z'/%3E%3C/svg%3E") no-repeat center / contain; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 14'%3E%3Cpath d='M1 1l10 5-4.4 1.4L4.6 12z'/%3E%3C/svg%3E") no-repeat center / contain; color: var(--c); }
-.chip i { width: 14px; height: 14px; display: inline-grid; place-items: center; }
-.chip i svg { width: 14px; height: 14px; }
-.chip.desktop { --c: var(--codex); background: var(--codex); left: 12%; top: 14%; }
-.chip.laptop { --c: var(--laptop); background: var(--laptop); left: 22%; top: 76%; animation-delay: -2s; }
-.chip.vps { --c: var(--vps); background: var(--vps); right: 13%; top: 6%; animation-delay: -4s; }
-.chip.you { --c: var(--blue); background: var(--blue); right: 21%; top: 74%; animation-delay: -1s; }
-@keyframes drift { 0%, 100% { translate: 0 0; } 33% { translate: 14px -8px; } 66% { translate: -8px 6px; } }
-.badge { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 3px 12px 3px 3px; font-size: 13px; color: var(--ink-2); }
-.badge b { background: var(--blue); color: #fff; border-radius: 999px; padding: 3px 10px; font-weight: 600; }
-.badge svg { width: 12px; height: 12px; }
-h1, h2 { text-wrap: balance; }
-.lede, .head p, .sub { text-wrap: pretty; }
-h1 { font: 700 clamp(38px, 6.2vw, 66px)/1.06 var(--display); letter-spacing: -.032em; margin: 24px auto 18px; max-width: 16ch; }
-h1 em, h2 em { font-style: normal; color: var(--blue); }
-h1 em { display: block; }
-.lede { color: var(--muted); font-size: clamp(16px, 1.6vw, 18px); max-width: 560px; margin: 0 auto 30px; }
-.cta { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
-.install { margin: 28px auto 0; display: inline-flex; align-items: center; gap: 12px; max-width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: 7px 7px 7px 16px; background: var(--bg-soft); font: 14px/1.4 var(--mono); color: var(--ink-2); }
-.install .prompt { color: var(--faint); user-select: none; }
-.install code { overflow-x: auto; white-space: nowrap; }
-.copy { flex: none; display: inline-grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--muted); cursor: pointer; transition: color .15s, border-color .15s; }
-.copy:hover { color: var(--ink); border-color: #d3d8e0; }
-.copy svg { width: 15px; height: 15px; }
-.copy.done { color: var(--green); }
-@media (max-width: 640px) {
-  .chip { font-size: 11px; padding: 4px 9px 4px 7px; }
-  .chip.desktop { left: 4%; top: 6%; } .chip.laptop { left: 6%; top: 82%; } .chip.vps { right: 4%; top: 2%; } .chip.you { right: 6%; top: 80%; }
-}
+.hero { padding: 72px 0 40px; }
+.hero .wrap { display: grid; grid-template-columns: 1.05fr .95fr; gap: 64px; align-items: center; }
+.hero h1 { font-size: clamp(48px, 6.6vw, 86px); line-height: .98; margin: 22px 0 24px; }
+html:lang(ko) .hero h1 { font-size: clamp(38px, 5.2vw, 64px); line-height: 1.14; }
+.hero p.lede { font-size: 18px; color: var(--ink-2); max-width: 30em; margin: 0 0 32px; }
+.get { display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: center; }
+.cmd { display: inline-flex; align-items: center; gap: 14px; background: var(--ink); color: #e9ecf2; border-radius: 10px; padding: 12px 12px 12px 18px; font: 14px/1.2 var(--mono); max-width: 100%; }
+.cmd span { overflow-x: auto; white-space: nowrap; }
+.cmd span::before { content: "$ "; color: #7d8696; }
+.cp { flex: none; border: 0; background: rgba(255,255,255,.1); color: #cfd5df; width: 30px; height: 30px; border-radius: 7px; display: grid; place-items: center; cursor: pointer; }
+.cp:hover { background: rgba(255,255,255,.18); }
+.cp svg { width: 14px; height: 14px; }
+.cp.light { background: var(--card); border: 1px solid var(--rule); color: var(--muted); }
+.cp.light:hover { color: var(--ink); }
+.cp.ok { color: #8fd19e; }
+.cp.light.ok { color: var(--moss); }
+.link { font-size: 15px; color: var(--ink-2); text-decoration: none; border-bottom: 1px solid var(--rule); padding-bottom: 2px; }
+.link:hover { color: var(--ink); border-color: var(--ink-2); }
+.facts { display: flex; gap: 10px 22px; flex-wrap: wrap; margin-top: 34px; font-size: 13.5px; color: var(--muted); }
+.facts > span { display: inline-flex; align-items: center; gap: 7px; }
+.facts svg { width: 15px; height: 15px; color: var(--moss); }
+
+/* ticket */
+.ticket { position: relative; background: var(--card); border: 1px solid var(--rule); border-radius: 18px; box-shadow: 0 1px 0 rgba(28,34,48,.03), 0 24px 48px -24px rgba(28,34,48,.18); font-size: 14px; }
+.t-head { display: flex; justify-content: space-between; align-items: center; padding: 16px 22px; border-bottom: 1px solid var(--rule-2); font: 500 11.5px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.t-head b { color: var(--ink); font-weight: 500; }
+.route { display: grid; grid-template-columns: 1fr auto 1fr; align-items: end; gap: 14px; padding: 22px 22px 20px; }
+.route small { display: block; font: 500 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin-bottom: 8px; }
+.route strong { display: block; font: 400 34px/1 var(--serif); letter-spacing: -.01em; transition: color .3s; }
+.route em { display: block; font: normal 12px/1.4 var(--mono); color: var(--muted); margin-top: 6px; }
+.route .to { text-align: right; }
+.route .path { width: 96px; height: 28px; margin-bottom: 18px; color: var(--sea); }
+.perf { position: relative; height: 0; border-top: 1.5px dashed var(--rule); margin: 0 18px; }
+.perf::before, .perf::after { content: ""; position: absolute; top: -12px; width: 22px; height: 22px; border-radius: 50%; background: var(--paper); border: 1px solid var(--rule); }
+.perf::before { left: -30px; clip-path: inset(0 0 0 50%); }
+.perf::after { right: -30px; clip-path: inset(0 50% 0 0); }
+.manifest { padding: 16px 22px 6px; }
+.manifest h4 { margin: 0 0 8px; font: 500 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.manifest ul { list-style: none; margin: 0; padding: 0; }
+.manifest li { display: grid; grid-template-columns: 30px 1fr auto; gap: 10px; align-items: baseline; padding: 7px 0; border-bottom: 1px solid var(--rule-2); font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); }
+.manifest li:last-child { border-bottom: 0; }
+.manifest li b { font-weight: 500; color: var(--sea); }
+.manifest li .k { font-family: var(--sans); font-size: 12px; color: var(--muted); }
+.manifest li.s b { color: var(--apricot); }
+.home { padding: 10px 22px 18px; font-size: 12.5px; color: var(--muted); }
+.home code { color: var(--ink-2); }
+.t-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px 14px 22px; border-top: 1px solid var(--rule-2); background: #fcfcfa; border-radius: 0 0 18px 18px; }
+.t-foot span { font: 12px/1.4 var(--mono); color: var(--muted); }
+.go { border: 0; border-radius: 9px; background: var(--sea); color: #fff; font: 500 13px/1 var(--mono); padding: 11px 14px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; transition: background .15s; white-space: nowrap; }
+.go:hover { background: #274f8c; }
+.go svg { width: 14px; height: 14px; }
+.stamp { position: absolute; right: 30px; top: 252px; transform: rotate(-9deg) scale(1.6); opacity: 0; border: 2px solid var(--moss); color: var(--moss); border-radius: 8px; padding: 6px 12px; font: 500 13px/1.25 var(--mono); letter-spacing: .1em; text-transform: uppercase; text-align: center; background: rgba(251,251,249,.9); pointer-events: none; transition: opacity .25s, transform .35s cubic-bezier(.2,1.6,.4,1); }
+.stamp small { display: block; font-size: 10.5px; letter-spacing: .06em; opacity: .8; }
+.ticket.sent .stamp { opacity: 1; transform: rotate(-9deg) scale(1); }
+.ticket.sent .route .to strong { color: var(--sea); }
+@media (max-width: 920px) { .hero .wrap { grid-template-columns: 1fr; gap: 48px; } .hero { padding-top: 48px; } }
+@media (max-width: 440px) { .route strong { font-size: 27px; } .route .path { width: 52px; } .stamp { top: 236px; right: 14px; } .t-foot { flex-direction: column; align-items: stretch; } .go { justify-content: center; } }
+
+/* rail */
+.rail { padding: 36px 0 96px; }
+.rail svg { width: 100%; height: auto; display: block; }
+.rail .cap { display: grid; grid-template-columns: repeat(3, 1fr); text-align: center; font-size: 13.5px; color: var(--muted); margin-top: 6px; }
+.rail .cap b { display: block; color: var(--ink); font-weight: 600; font-size: 15px; }
 
 /* sections */
-section { padding: 104px 0; }
-section.soft { background: var(--bg-soft); border-top: 1px solid var(--line-2); border-bottom: 1px solid var(--line-2); }
-.head { text-align: center; max-width: 680px; margin: 0 auto 56px; }
-.kicker { display: inline-block; background: var(--blue-soft); color: var(--blue-ink); font-weight: 600; font-size: 13px; padding: 4px 12px; border-radius: 999px; margin-bottom: 18px; }
-h2 { font: 700 clamp(32px, 4.6vw, 50px)/1.1 var(--display); letter-spacing: -.03em; margin: 0 0 18px; }
-.head p, .sub { color: var(--muted); font-size: 17px; margin: 0; }
-h3 { font: 600 16px/1.35 var(--sans); letter-spacing: -.01em; margin: 0 0 6px; }
+section.band { padding: 104px 0; border-top: 1px solid var(--rule); }
+section.white { background: #fff; }
+.intro { display: grid; grid-template-columns: .9fr 1.1fr; gap: 64px; align-items: end; margin-bottom: 56px; }
+.intro h2 { font-size: clamp(38px, 4.8vw, 58px); line-height: 1.02; margin-top: 18px; }
+html:lang(ko) .intro h2 { font-size: clamp(28px, 3.4vw, 42px); line-height: 1.22; }
+.intro p { margin: 0; color: var(--ink-2); font-size: 17px; }
+@media (max-width: 860px) { .intro { grid-template-columns: 1fr; gap: 18px; } section.band { padding: 80px 0; } }
 
-/* compare */
-.legend { display: flex; justify-content: center; gap: 22px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-bottom: 18px; }
-.legend span { display: inline-flex; align-items: center; gap: 8px; }
-.legend i { width: 16px; height: 3px; border-radius: 2px; background: var(--c); }
-.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-.card { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
-.card.accent { border-color: var(--blue-line); box-shadow: 0 0 0 4px rgba(64,107,166,.06), var(--shadow); }
-.compare .card { padding: 22px 22px 8px; }
-.card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-.card-top h3 { font-size: 18px; margin: 0; }
-.card.accent .card-top h3 { color: var(--blue); }
-.tag { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; }
-.flow { width: 100%; height: auto; display: block; margin: 6px 0 4px; }
-.rows { margin: 0; padding: 0; list-style: none; }
-.rows li { display: grid; grid-template-columns: 120px 1fr; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line-2); font-size: 14px; }
-.rows li span:first-child { color: var(--muted); }
-.bad { color: var(--red); } .good { color: var(--green); }
-.steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; margin: 44px 0 0; padding: 0; list-style: none; counter-reset: s; }
-.steps li { position: relative; padding: 18px 16px 0 0; counter-increment: s; }
-.steps li::before { content: counter(s); display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid var(--blue); color: var(--blue); font: 600 13px/1 var(--sans); margin-bottom: 12px; background: #fff; position: relative; z-index: 1; }
-.steps li::after { content: ""; position: absolute; top: 31px; left: 26px; right: 0; height: 1px; background: var(--blue-line); }
-.steps li:last-child::after { display: none; }
-.steps p { color: var(--muted); font-size: 14px; margin: 0; }
-@media (max-width: 860px) { .compare { grid-template-columns: 1fr; } .steps { grid-template-columns: 1fr 1fr; row-gap: 8px; } .steps li::after { display: none; } }
+/* sentence */
+.sentence { text-align: center; padding: 18px 0 8px; }
+.sentence .line { display: inline-flex; flex-wrap: wrap; justify-content: center; gap: .55em; font: 500 clamp(26px, 5vw, 58px)/1.2 var(--mono); letter-spacing: -.02em; }
+.sentence .part { position: relative; padding-bottom: 14px; border-bottom: 2px solid var(--c); }
+.sentence .part small { position: absolute; left: 0; right: 0; top: 100%; margin-top: 10px; font: 500 11.5px/1.3 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+.outcomes { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 84px; border: 1px solid var(--rule); border-radius: 16px; background: var(--card); overflow: hidden; }
+.outcome { padding: 26px 26px 28px; border-left: 1px solid var(--rule); }
+.outcome:first-child { border-left: 0; }
+.outcome .dia { height: 44px; margin-bottom: 18px; }
+.outcome .dia svg { height: 44px; width: auto; }
+.outcome h3 { margin: 0 0 6px; font: 600 17px/1.35 var(--sans); letter-spacing: -.01em; }
+.outcome p { margin: 0; color: var(--muted); font-size: 14.5px; }
+.outcome code { color: var(--ink-2); white-space: nowrap; }
+.outcome .verb { display: inline-block; margin-bottom: 12px; font: 500 12px/1 var(--mono); padding: 5px 8px; border-radius: 6px; background: var(--sea-soft); color: var(--sea); }
+.outcome.stop .verb { background: #f8ebe8; color: var(--brick); }
+.outcome.back .verb { background: var(--apricot-soft); color: #a4562a; }
+@media (max-width: 860px) { .outcomes { grid-template-columns: 1fr; } .outcome { border-left: 0; border-top: 1px solid var(--rule); } .outcome:first-child { border-top: 0; } }
 
-/* terminal demo */
-.terms { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-.term { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); min-width: 0; }
-.term-bar { display: flex; align-items: center; gap: 10px; padding: 11px 16px; border-bottom: 1px solid var(--line-2); font-size: 13px; color: var(--ink-2); background: #fcfdfe; }
-.term-bar .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--c); }
-.term-bar small { margin-left: auto; color: var(--faint); font-family: var(--mono); font-size: 12px; }
-.term-body { height: 300px; padding: 14px 16px; font: 13px/1.7 var(--mono); color: var(--ink-2); overflow: hidden; white-space: pre-wrap; word-break: break-word; }
-.term-body .cmd { color: var(--ink); }
-.term-body .cmd::before { content: "$ "; color: var(--faint); }
-.term-body .ok { color: var(--green); }
-.term-body .dim { color: var(--faint); }
-.term-body .hl { color: var(--blue-ink); }
-.term-body .agent { display: inline-block; background: var(--bg-soft); border-radius: 10px; padding: 6px 10px; margin: 4px 0; font-family: var(--sans); font-size: 13.5px; color: var(--ink); white-space: normal; }
-.caret { display: inline-block; width: 7px; height: 15px; background: var(--blue); vertical-align: -3px; animation: blink 1s steps(1) infinite; }
-@keyframes blink { 50% { opacity: 0; } }
-.term-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
-.term-foot .status { color: var(--muted); font-size: 14px; }
-.ctrls { display: flex; gap: 8px; flex-wrap: wrap; }
-.note { color: var(--faint); font-size: 12.5px; margin-top: 12px; }
-@media (max-width: 860px) { .terms { grid-template-columns: 1fr; } .term-body { height: 240px; } }
+/* bag */
+.bag { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--rule); border-radius: 16px; overflow: hidden; background: var(--card); }
+.bag > div { padding: 8px 28px 16px; }
+.bag > div + div { border-left: 1px solid var(--rule); background: #fcfcfa; }
+.bag h3 { display: flex; align-items: baseline; justify-content: space-between; margin: 0; padding: 20px 0 14px; font: 500 12px/1 var(--mono); letter-spacing: .08em; color: var(--faint); border-bottom: 1px solid var(--rule); }
+.bag h3 span { font-family: var(--serif); font-weight: 400; letter-spacing: 0; font-size: 28px; color: var(--ink); }
+html:lang(ko) .bag h3 span { font-family: var(--sans); font-weight: 700; font-size: 20px; letter-spacing: -.03em; }
+.bag ul { list-style: none; margin: 0; padding: 0; }
+.bag li { padding: 15px 0; border-bottom: 1px dashed var(--rule); display: grid; grid-template-columns: 22px 1fr; gap: 10px; }
+.bag li:last-child { border-bottom: 0; }
+.bag li svg { width: 16px; height: 16px; margin-top: 4px; }
+.bag li b { display: block; font-weight: 600; font-size: 15px; }
+.bag li span { color: var(--muted); font-size: 14px; }
+@media (max-width: 760px) { .bag { grid-template-columns: 1fr; } .bag > div + div { border-left: 0; border-top: 1px solid var(--rule); } .bag > div { padding: 8px 20px 12px; } }
 
-/* sync decision */
-.split { display: grid; grid-template-columns: 1fr 1.08fr; gap: 56px; align-items: center; }
-.split h2 { text-align: left; }
-.toggles { display: grid; gap: 10px; margin-top: 28px; }
-.toggle { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; border: 1px solid var(--line); background: #fff; border-radius: 12px; padding: 12px 14px; font: inherit; font-size: 15px; color: var(--ink-2); cursor: pointer; transition: border-color .15s, background .15s; }
-.toggle:hover { border-color: #d3d8e0; }
-.toggle .sw { flex: none; width: 34px; height: 20px; border-radius: 999px; background: #dfe4ea; position: relative; transition: background .2s; }
-.toggle .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.2); transition: transform .2s; }
-.toggle[aria-pressed="true"] { border-color: var(--blue-line); background: #fbfdff; color: var(--ink); }
-.toggle[aria-pressed="true"] .sw { background: var(--blue); }
-.toggle[aria-pressed="true"] .sw::after { transform: translateX(14px); }
-.decide { padding: 26px; }
-.decide-top { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--muted); padding-bottom: 14px; border-bottom: 1px solid var(--line-2); }
-.decide-top code { color: var(--ink); font-size: 13px; }
-.lanes { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; padding: 30px 0 24px; }
-.dev { text-align: center; border: 1px solid var(--line); border-radius: 12px; padding: 16px 8px; position: relative; transition: border-color .2s, box-shadow .2s; }
-.dev svg { width: 34px; height: 34px; color: var(--ink-2); }
-.dev div { font-size: 14px; font-weight: 600; margin-top: 4px; }
-.dev small { display: block; font-size: 12px; color: var(--faint); min-height: 18px; }
-.dev.changed { border-color: var(--blue-line); box-shadow: 0 0 0 3px rgba(64,107,166,.08); }
-.dev.changed small { color: var(--blue); }
-.arrow { width: 92px; height: 24px; color: var(--blue); transition: transform .35s, opacity .2s; }
-.arrow.left { transform: scaleX(-1); }
-.arrow.none, .arrow.stop { opacity: .25; }
-.arrow line { stroke-dasharray: 5 5; animation: flow 1s linear infinite; }
-@keyframes flow { to { stroke-dashoffset: -10; } }
-.verdict { border-radius: 12px; background: var(--bg-soft); padding: 16px 18px; }
-.verdict b { display: block; font: 700 22px/1.25 var(--display); letter-spacing: -.02em; margin-bottom: 4px; }
-.verdict p { margin: 0; color: var(--muted); font-size: 14px; }
-.verdict code { color: var(--blue-ink); background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 13px; }
-.verdict.stop b { color: var(--red); }
-@media (max-width: 860px) { .split { grid-template-columns: 1fr; gap: 32px; } .arrow { width: 56px; } }
+/* routes */
+.routes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.rt { background: var(--card); border: 1px solid var(--rule); border-radius: 16px; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+.rt-top { padding: 24px 24px 20px; }
+.rt-top svg { width: 100%; height: 34px; display: block; margin-bottom: 18px; }
+.rt h3 { font: 400 30px/1.05 var(--serif); margin: 0 0 8px; }
+html:lang(ko) .rt h3 { font-family: var(--sans); font-weight: 700; font-size: 21px; letter-spacing: -.03em; }
+.rt p { margin: 0; color: var(--muted); font-size: 14.5px; }
+.rt pre { position: relative; margin: auto 0 0; padding: 16px 48px 16px 20px; background: #f6f6f2; border-top: 1px solid var(--rule); font: 12.5px/1.8 var(--mono); color: var(--ink-2); overflow-x: auto; }
+.rt pre .c { color: var(--faint); }
+.rt pre .cp { position: absolute; top: 12px; right: 12px; }
+@media (max-width: 960px) { .routes { grid-template-columns: 1fr; } }
 
-/* connect tabs */
-.tabs { display: inline-flex; gap: 4px; padding: 4px; background: var(--bg-soft); border: 1px solid var(--line); border-radius: 999px; margin: 0 auto 26px; }
-.tabs button { border: 0; background: transparent; border-radius: 999px; padding: 8px 18px; font: 600 14px/1 var(--sans); color: var(--muted); cursor: pointer; }
-.tabs button[aria-selected="true"] { background: #fff; color: var(--ink); box-shadow: 0 1px 3px rgba(31,41,55,.12); }
-.tabwrap { text-align: center; }
-.panel { text-align: left; display: grid; grid-template-columns: 1fr 1.15fr; gap: 0; overflow: hidden; }
-.panel[hidden] { display: none; }
-.panel ol { margin: 0; padding: 26px 26px 26px 48px; display: grid; gap: 14px; align-content: start; }
-.panel ol li { color: var(--ink-2); font-size: 15px; padding-left: 4px; }
-.panel ol li::marker { color: var(--blue); font-weight: 600; }
-.panel ol li span { display: block; color: var(--muted); font-size: 13.5px; }
-.code { position: relative; background: #fbfcfe; border-left: 1px solid var(--line-2); padding: 22px 56px 22px 22px; font: 13.5px/1.85 var(--mono); color: var(--ink-2); white-space: pre; overflow-x: auto; }
-.code .c { color: var(--faint); }
-.code .copy { position: absolute; top: 14px; right: 14px; }
-@media (max-width: 860px) { .panel { grid-template-columns: 1fr; } .code { border-left: 0; border-top: 1px solid var(--line-2); } }
+/* faq */
+.faqgrid { display: grid; grid-template-columns: .9fr 1.1fr; gap: 64px; align-items: start; }
+.faqgrid h2 { font-size: clamp(38px, 4.8vw, 58px); line-height: 1.02; margin-top: 18px; }
+html:lang(ko) .faqgrid h2 { font-size: clamp(28px, 3.4vw, 42px); line-height: 1.22; }
+.faq { border-top: 1px solid var(--rule); }
+@media (max-width: 860px) { .faqgrid { grid-template-columns: 1fr; gap: 28px; } }
+.faq details { border-bottom: 1px solid var(--rule); }
+.faq summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 22px 4px; font-size: 18px; font-weight: 500; letter-spacing: -.01em; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after { content: ""; flex: none; width: 10px; height: 10px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(45deg); margin-top: -6px; transition: transform .2s, margin .2s; }
+.faq details[open] summary::after { transform: rotate(-135deg); margin-top: 4px; }
+.faq details p { margin: -6px 4px 22px; color: var(--ink-2); max-width: 44em; }
 
-/* moves */
-.moves { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-.moves .card { padding: 24px 26px; }
-.moves ul { list-style: none; margin: 14px 0 0; padding: 0; }
-.moves li { display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line-2); font-size: 15px; color: var(--ink-2); }
-.moves li svg { flex: none; width: 18px; height: 18px; margin-top: 3px; }
-.moves li small { display: block; color: var(--muted); font-size: 13.5px; }
-@media (max-width: 860px) { .moves { grid-template-columns: 1fr; } }
+/* closing */
+.closing { padding: 120px 0 110px; border-top: 1px solid var(--rule); }
+.closing .wrap { display: grid; grid-template-columns: 1.2fr .8fr; gap: 48px; align-items: end; }
+.closing h2 { font-size: clamp(46px, 7vw, 96px); line-height: .96; }
+html:lang(ko) .closing h2 { font-size: clamp(34px, 4.8vw, 60px); line-height: 1.14; }
+.closing .side { display: grid; gap: 16px; justify-items: start; }
+.closing .side p { margin: 0; color: var(--muted); }
+@media (max-width: 860px) { .closing .wrap { grid-template-columns: 1fr; } .closing { padding: 88px 0; } }
+footer { border-top: 1px solid var(--rule); padding: 24px 0 32px; font-size: 13.5px; color: var(--muted); }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: center; }
+footer nav { display: flex; gap: 22px; margin-left: auto; flex-wrap: wrap; }
+footer a { text-decoration: none; color: var(--ink-2); }
+footer a:hover { color: var(--ink); }
 
-/* principles */
-.princ { display: grid; grid-template-columns: .9fr 1.1fr; gap: 56px; align-items: start; }
-.princ h2 { margin: 0; }
-.princ ul { list-style: none; margin: 0; padding: 0; }
-.princ li { padding: 16px 0; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 15px; }
-.princ li:first-child { padding-top: 4px; }
-.princ li b { color: var(--ink); font-weight: 600; margin-right: 6px; }
-@media (max-width: 860px) { .princ { grid-template-columns: 1fr; gap: 24px; } }
-
-/* final */
-.final { text-align: center; padding: 120px 0; }
-.final h2 { font-size: clamp(40px, 7vw, 76px); line-height: 1.02; margin-bottom: 34px; }
-footer { border-top: 1px solid var(--line); padding: 26px 0; font-size: 14px; color: var(--muted); }
-footer .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-footer nav { display: flex; gap: 20px; color: var(--ink-2); }
-footer nav a:hover { color: var(--ink); }
-
-.js .reveal { opacity: 0; transform: translateY(14px); transition: opacity .6s ease, transform .6s ease; }
-.js .reveal.in { opacity: 1; transform: none; }
-@media (prefers-reduced-motion: reduce) { .chip, .caret, .arrow line { animation: none; } .reveal { opacity: 1; transform: none; transition: none; } html { scroll-behavior: auto; } }
-.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.js .rise { opacity: 0; transform: translateY(10px); transition: opacity .7s ease, transform .7s ease; }
+.js .rise.in { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) { .js .rise { opacity: 1; transform: none; transition: none; } .stamp { transition: none; } html { scroll-behavior: auto; } }
 </style>
 </head>
 <body>
-
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-  <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5" y="5" width="9" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M11 3.5V3a1.5 1.5 0 0 0-1.5-1.5h-6A1.5 1.5 0 0 0 2 3v6.5A1.5 1.5 0 0 0 3.5 11H4" fill="none" stroke="currentColor" stroke-width="1.4"/></symbol>
-  <symbol id="i-check" viewBox="0 0 16 16"><path d="M3 8.5l3.2 3L13 4.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
-  <symbol id="i-arrow" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
-  <symbol id="i-out" viewBox="0 0 16 16"><path d="M5 11l6-6M6 4.5h5.5V10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
-  <symbol id="i-desktop" viewBox="0 0 32 32"><rect x="4" y="6" width="24" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 26h8M16 21v5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
-  <symbol id="i-laptop" viewBox="0 0 32 32"><rect x="7" y="8" width="18" height="12" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4 24h24" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
-  <symbol id="i-server" viewBox="0 0 32 32"><rect x="6" y="6" width="20" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="6" y="18" width="20" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="10.5" cy="10" r="1.2" fill="currentColor"/><circle cx="10.5" cy="22" r="1.2" fill="currentColor"/></symbol>
-  <symbol id="i-yes" viewBox="0 0 18 18"><circle cx="9" cy="9" r="8" fill="#e7f3ea"/><path d="M5.5 9.2l2.3 2.2L12.6 6.6" fill="none" stroke="#2c7a3f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
-  <symbol id="i-stay" viewBox="0 0 18 18"><circle cx="9" cy="9" r="8" fill="#eef1f5"/><path d="M6 9h6" stroke="#6c7582" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="copy" viewBox="0 0 16 16"><rect x="5" y="5" width="9" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M11 3.5V3a1.5 1.5 0 0 0-1.5-1.5h-6A1.5 1.5 0 0 0 2 3v6.5A1.5 1.5 0 0 0 3.5 11H4" fill="none" stroke="currentColor" stroke-width="1.4"/></symbol>
+  <symbol id="tick" viewBox="0 0 16 16"><path d="M3 8.5l3.2 3L13 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="send" viewBox="0 0 16 16"><path d="M2.5 8h10M9 4.5L12.5 8 9 11.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="in" viewBox="0 0 18 18"><circle cx="9" cy="9" r="8" fill="#ebf4ed"/><path d="M5.6 9.3l2.2 2.1 4.6-4.8" fill="none" stroke="#3d7a4e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="out" viewBox="0 0 18 18"><circle cx="9" cy="9" r="8" fill="#f0f0ec"/><path d="M6.5 6.5l5 5M11.5 6.5l-5 5" stroke="#8a919c" stroke-width="1.5" stroke-linecap="round"/></symbol>
 </svg>
 
-<header class="nav" id="nav">
+<header class="top" id="top">
   <div class="wrap">
-    <a class="brand" href="#top" aria-label="onthego home">
-      <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="11" y="3" width="18" height="18" rx="5" fill="none" stroke="#9fbbe0" stroke-width="2"/><rect x="3" y="11" width="18" height="18" rx="5" fill="#406ba6"/><path d="M7.5 20h9m-3.5-3.5L16.5 20 13 23.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <a class="logo" href="#" aria-label="onthego">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="3.2" fill="#1c2230"/><circle cx="19" cy="12" r="3.2" fill="none" stroke="#1c2230" stroke-width="1.8"/><path d="M8.6 12h6.2" stroke="#2f5fa7" stroke-width="1.8" stroke-linecap="round" stroke-dasharray="1.6 2.4"/></svg>
       onthego
     </a>
-    <nav class="nav-links" aria-label="Main">
-      <a class="hide-sm" href="#how" data-i18n="nav.how">How it works</a>
-      <a class="hide-sm" href="#connect" data-i18n="nav.setup">Setup</a>
-      <a class="hide-sm" href="https://github.com/peerproblem/onthego">GitHub</a>
-      <label class="sr" for="lang">Language</label>
-      <select class="lang" id="lang" aria-label="Language"><option value="en">English</option><option value="ko">한국어</option></select>
-      <a class="pill primary sm" href="#install" data-i18n="nav.install">Install</a>
+    <nav aria-label="Main">
+      <a class="opt" href="#sync" data-t="nav.sync">How sync decides</a>
+      <a class="opt" href="#routes" data-t="nav.routes">Setup</a>
+      <a class="opt" href="#faq">FAQ</a>
+      <a href="https://github.com/peerproblem/onthego">GitHub</a>
+      <span class="langs" role="group" aria-label="Language"><button type="button" data-lang="en" aria-pressed="true">EN</button><button type="button" data-lang="ko" aria-pressed="false">한</button></span>
     </nav>
   </div>
 </header>
 
-<main id="top">
-<section class="hero" style="padding-top:28px">
+<main>
+<section class="hero">
   <div class="wrap">
-    <div class="mark" aria-hidden="true">
-      <span class="w ghost up">onthego</span>
-      <span class="w solid">onthego</span>
-      <span class="w ghost down">onthego</span>
-      <span class="chip desktop"><i><svg><use href="#i-desktop"/></svg></i>Desktop</span>
-      <span class="chip vps"><i><svg><use href="#i-server"/></svg></i>VPS</span>
-      <span class="chip laptop"><i><svg><use href="#i-laptop"/></svg></i>Laptop</span>
-      <span class="chip you">You</span>
+    <div>
+      <div class="label rise" data-t="hero.label">Open-source CLI for Codex and Claude Code</div>
+      <h1 class="rise" data-t="hero.title">Start at your desk. <i>Finish anywhere.</i></h1>
+      <p class="lede rise" data-t="hero.lede">onthego hands an unfinished Git workspace, and the agent conversation that goes with it, from one of your machines to another. Close the lid, open the laptop, and resume the same session.</p>
+      <div class="get rise">
+        <div class="cmd"><span>npm install -g @jbaehova/onthego</span><button class="cp" type="button" data-copy="npm install -g @jbaehova/onthego" aria-label="Copy"><svg><use href="#copy"/></svg></button></div>
+        <a class="link" href="https://github.com/peerproblem/onthego#quick-start" data-t="hero.qs">Quick start</a>
+      </div>
+      <div class="facts rise">
+        <span><svg><use href="#tick"/></svg><span data-t="f1">No account</span></span>
+        <span><svg><use href="#tick"/></svg><span data-t="f2">No server</span></span>
+        <span><svg><use href="#tick"/></svg><span data-t="f3">Your own SSH</span></span>
+        <span><svg><use href="#tick"/></svg>MIT</span>
+      </div>
     </div>
-    <a class="badge" href="https://github.com/peerproblem/onthego"><b data-i18n="hero.badge">Open source CLI</b><span data-i18n="hero.badge2">for Codex and Claude Code</span><svg><use href="#i-arrow"/></svg></a>
-    <h1 data-i18n="hero.title">Your work. <em>On every device.</em></h1>
-    <p class="lede" data-i18n="hero.lede">Move an unfinished Git workspace and its coding-agent conversations between your desktop, laptop, and VPS with one command. Then resume right where you stopped.</p>
-    <div class="cta">
-      <a class="pill primary" href="#install"><span data-i18n="hero.install">Install</span><svg><use href="#i-arrow"/></svg></a>
-      <a class="pill ghost" href="#demo"><span data-i18n="hero.see">See it work</span><svg><use href="#i-arrow"/></svg></a>
-    </div>
-    <div class="install" id="install">
-      <span class="prompt">$</span><code>npm install -g @jbaehova/onthego</code>
-      <button class="copy" type="button" data-copy="npm install -g @jbaehova/onthego" aria-label="Copy install command"><svg><use href="#i-copy"/></svg></button>
-    </div>
-  </div>
-</section>
 
-<section class="soft" id="how">
-  <div class="wrap">
-    <div class="head reveal">
-      <span class="kicker" data-i18n="how.kicker">Handoffs, not homework</span>
-      <h2 data-i18n="how.title">Pick up exactly where you left off.</h2>
-      <p data-i18n="how.sub">Switching machines usually means a throwaway commit, a push, a pull, and explaining everything to your agent again. onthego carries the whole working state instead: staged, unstaged, and untracked work, plus the sessions you were having with Codex and Claude Code.</p>
-    </div>
-    <div class="legend reveal"><span><i style="--c:var(--codex)"></i>Desktop</span><span><i style="--c:var(--laptop)"></i>Laptop</span><span><i style="--c:var(--claude)"></i><span data-i18n="how.agent">Agent session</span></span></div>
-    <div class="compare reveal">
-      <article class="card">
-        <div class="card-top"><h3 data-i18n="how.usual">Commit and push</h3><span class="tag" data-i18n="how.usualTag">The usual way</span></div>
-        <svg class="flow" viewBox="0 0 440 190" role="img" aria-label="The usual way: a WIP commit goes through a Git host, and the agent session stays behind on the desktop">
-          <text x="10" y="22" font-size="12" fill="#6c7582" font-family="ui-monospace,Menlo,monospace">desktop</text>
-          <path d="M14 40 H170" stroke="#1f2328" stroke-width="2.4" fill="none" stroke-linecap="round"/>
-          <circle cx="60" cy="40" r="5" fill="#fff" stroke="#1f2328" stroke-width="2"/><circle cx="120" cy="40" r="5" fill="#fff" stroke="#1f2328" stroke-width="2"/>
-          <text x="134" y="28" font-size="11" fill="#b4372f" font-family="ui-monospace,Menlo,monospace">wip!!</text>
-          <path d="M170 40 C200 40 205 95 235 95 C265 95 270 140 300 140 H426" stroke="#6a4fd1" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-dasharray="1 0"/>
-          <rect x="196" y="82" width="78" height="26" rx="13" fill="#f7f9fc" stroke="#e6e9ee"/>
-          <text x="235" y="99" text-anchor="middle" font-size="11.5" fill="#474f5b" font-family="-apple-system,Helvetica,Arial">git host</text>
-          <text x="10" y="162" font-size="12" fill="#6c7582" font-family="ui-monospace,Menlo,monospace">laptop</text>
-          <circle cx="352" cy="140" r="5" fill="#fff" stroke="#6a4fd1" stroke-width="2"/>
-          <path d="M14 70 H118" stroke="#c8623f" stroke-width="2" fill="none" stroke-dasharray="4 4" stroke-linecap="round"/>
-          <text x="14" y="90" font-size="11" fill="#c8623f" font-family="-apple-system,Helvetica,Arial">session stays here</text>
-          <text x="310" y="168" font-size="11" fill="#9aa3af" font-family="-apple-system,Helvetica,Arial">"where were we?"</text>
-        </svg>
-        <ul class="rows">
-          <li><span data-i18n="how.r1">Unfinished work</span><span class="bad" data-i18n="how.u1">Squashed into a WIP commit</span></li>
-          <li><span data-i18n="how.r2">Agent context</span><span class="bad" data-i18n="how.u2">Left behind. You explain it again</span></li>
-          <li><span data-i18n="how.r3">Goes through</span><span class="bad" data-i18n="how.u3">A Git host, and your history</span></li>
+    <article class="ticket rise" id="ticket" aria-label="Example handoff">
+      <div class="t-head"><span data-t="t.head">Handoff</span><b>#7f3a</b></div>
+      <div class="route">
+        <div><small data-t="t.from">From</small><strong>Desktop</strong><em>~/projects/shop</em></div>
+        <svg class="path" viewBox="0 0 96 28" aria-hidden="true"><path d="M2 20 C 30 2, 66 2, 92 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 4"/><path d="M84 14l8 6-9 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="to"><small data-t="t.to">To</small><strong>Laptop</strong><em>~/projects/shop</em></div>
+      </div>
+      <div class="perf" aria-hidden="true"></div>
+      <div class="manifest">
+        <h4 data-t="t.packed">Packed</h4>
+        <ul>
+          <li><b>M</b>src/checkout.ts<span class="k" data-t="t.staged">staged</span></li>
+          <li><b>M</b>src/retry.ts<span class="k" data-t="t.unstaged">unstaged</span></li>
+          <li><b>??</b>notes/refund-plan.md<span class="k" data-t="t.untracked">untracked</span></li>
+          <li class="s"><b>●</b>codex 0199a88c<span class="k" data-t="t.session">session</span></li>
+          <li class="s"><b>●</b>claude 4f2e19d0<span class="k" data-t="t.session">session</span></li>
         </ul>
-      </article>
-      <article class="card accent">
-        <div class="card-top"><h3>onthego</h3><span class="tag" data-i18n="how.otgTag">One command</span></div>
-        <svg class="flow" viewBox="0 0 440 190" role="img" aria-label="With onthego: the workspace and the agent session travel together directly to the laptop">
-          <text x="10" y="22" font-size="12" fill="#6c7582" font-family="ui-monospace,Menlo,monospace">desktop</text>
-          <path d="M14 40 H190" stroke="#1f2328" stroke-width="2.4" fill="none" stroke-linecap="round"/>
-          <circle cx="60" cy="40" r="5" fill="#fff" stroke="#1f2328" stroke-width="2"/><circle cx="120" cy="40" r="5" fill="#fff" stroke="#1f2328" stroke-width="2"/>
-          <path d="M14 70 H190" stroke="#c8623f" stroke-width="2" fill="none" stroke-dasharray="4 4" stroke-linecap="round"/>
-          <path d="M190 40 C230 40 240 140 280 140 H426" stroke="#6a4fd1" stroke-width="2.4" fill="none" stroke-linecap="round"/>
-          <path d="M190 70 C232 70 242 166 282 166 H426" stroke="#c8623f" stroke-width="2" fill="none" stroke-dasharray="4 4" stroke-linecap="round"/>
-          <rect x="196" y="86" width="96" height="26" rx="13" fill="#e5f0fd"/>
-          <text x="244" y="103" text-anchor="middle" font-size="11.5" fill="#245485" font-weight="600" font-family="-apple-system,Helvetica,Arial">sync laptop</text>
-          <text x="10" y="132" font-size="12" fill="#6c7582" font-family="ui-monospace,Menlo,monospace">laptop</text>
-          <circle cx="352" cy="140" r="5" fill="#fff" stroke="#6a4fd1" stroke-width="2"/>
-          <text x="426" y="186" text-anchor="end" font-size="11" fill="#2c7a3f" font-family="-apple-system,Helvetica,Arial">codex resume: same conversation</text>
-        </svg>
-        <ul class="rows">
-          <li><span data-i18n="how.r1">Unfinished work</span><span class="good" data-i18n="how.o1">Staged, unstaged, untracked, exactly as is</span></li>
-          <li><span data-i18n="how.r2">Agent context</span><span class="good" data-i18n="how.o2">Codex and Claude sessions, ready to resume</span></li>
-          <li><span data-i18n="how.r3">Goes through</span><span class="good" data-i18n="how.o3">Nothing. Device to device over SSH</span></li>
+      </div>
+      <div class="home"><span data-t="t.home">Stays home:</span> <code>node_modules</code>, <code>.env</code>, <code>.cache</code></div>
+      <div class="t-foot"><span data-t="t.sig">encrypted for laptop, signed by desktop</span><button class="go" type="button" id="go"><svg><use href="#send"/></svg>onthego sync laptop</button></div>
+      <div class="stamp" aria-hidden="true"><span data-t="t.stamp">Delivered</span><small id="stamp-time">13:42</small></div>
+    </article>
+  </div>
+</section>
+
+<div class="rail wrap rise" aria-hidden="true">
+  <svg viewBox="0 0 1140 120">
+    <defs><linearGradient id="fade" x1="0" x2="1"><stop offset="0" stop-color="#b9cce8" stop-opacity="0"/><stop offset=".12" stop-color="#b9cce8"/><stop offset=".88" stop-color="#b9cce8"/><stop offset="1" stop-color="#b9cce8" stop-opacity="0"/></linearGradient></defs>
+    <path d="M40 60 H1100" stroke="url(#fade)" stroke-width="1.5" stroke-dasharray="2 6" fill="none"/>
+    <g transform="translate(190 60)"><circle r="34" fill="#fff" stroke="#e7e7e2"/><rect x="-15" y="-11" width="30" height="19" rx="2.5" fill="none" stroke="#1c2230" stroke-width="1.6"/><path d="M-6 14h12M0 8v6" stroke="#1c2230" stroke-width="1.6" stroke-linecap="round"/></g>
+    <g transform="translate(570 60)"><circle r="34" fill="#fff" stroke="#e7e7e2"/><rect x="-12" y="-10" width="24" height="16" rx="2" fill="none" stroke="#1c2230" stroke-width="1.6"/><path d="M-17 11h34" stroke="#1c2230" stroke-width="1.6" stroke-linecap="round"/></g>
+    <g transform="translate(950 60)"><circle r="34" fill="#fff" stroke="#e7e7e2"/><rect x="-13" y="-13" width="26" height="10" rx="2" fill="none" stroke="#1c2230" stroke-width="1.6"/><rect x="-13" y="3" width="26" height="10" rx="2" fill="none" stroke="#1c2230" stroke-width="1.6"/><circle cx="-7" cy="-8" r="1.3" fill="#1c2230"/><circle cx="-7" cy="8" r="1.3" fill="#1c2230"/></g>
+    <g>
+      <rect x="-9" y="-9" width="18" height="18" rx="5" fill="#e0894f"/>
+      <path d="M-4 0h8M1.5-3L4 0 1.5 3" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <animateMotion dur="10s" repeatCount="indefinite" calcMode="linear" keyPoints="0;0;0.5;0.5;1;1;0.5;0.5;0" keyTimes="0;0.08;0.25;0.36;0.53;0.64;0.81;0.92;1" path="M190 22 H950"/>
+    </g>
+  </svg>
+  <div class="cap"><div><b>Desktop</b><span data-t="r1">where you start</span></div><div><b>Laptop</b><span data-t="r2">where you keep going</span></div><div><b>VPS</b><span data-t="r3">where long runs live</span></div></div>
+</div>
+
+<section class="band white" id="sync">
+  <div class="wrap">
+    <div class="intro">
+      <div><div class="label" data-t="s.label">One command</div><h2 class="rise" data-t="s.title">It reads like a sentence, <i>and decides with care.</i></h2></div>
+      <p class="rise" data-t="s.lede">You never pick a direction. sync looks at what changed on each side since your last handoff and only moves work away from the side that did not change. If both changed, it stops and asks. Nothing is ever merged behind your back.</p>
+    </div>
+    <div class="sentence rise" aria-label="onthego sync laptop">
+      <div class="line">
+        <span class="part" style="--c:#d7d7d0">onthego<small data-t="p1">the tool</small></span>
+        <span class="part" style="--c:var(--sea)">sync<small data-t="p2">decide, then move</small></span>
+        <span class="part" style="--c:var(--apricot)">laptop<small data-t="p3">a paired device</small></span>
+      </div>
+    </div>
+    <div class="outcomes">
+      <div class="outcome rise">
+        <div class="dia"><svg viewBox="0 0 120 44" aria-hidden="true"><circle cx="18" cy="22" r="12" fill="#edf3fb" stroke="#2f5fa7" stroke-width="1.5"/><circle cx="102" cy="22" r="12" fill="#fff" stroke="#d7d7d0" stroke-width="1.5"/><path d="M36 22h44M74 16l7 6-7 6" fill="none" stroke="#2f5fa7" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <span class="verb">push</span>
+        <h3 data-t="o1.t">Only this side changed</h3>
+        <p data-t="o1.d">Your new work goes to the other device, together with the sessions you were having.</p>
+      </div>
+      <div class="outcome back rise">
+        <div class="dia"><svg viewBox="0 0 120 44" aria-hidden="true"><circle cx="18" cy="22" r="12" fill="#fff" stroke="#d7d7d0" stroke-width="1.5"/><circle cx="102" cy="22" r="12" fill="#fbefe5" stroke="#e0894f" stroke-width="1.5"/><path d="M84 22H40M46 16l-7 6 7 6" fill="none" stroke="#e0894f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <span class="verb">pull</span>
+        <h3 data-t="o2.t">Only the other side changed</h3>
+        <p data-t="o2.d">It brings the work home. The same happens when you handed work off and simply want it back.</p>
+      </div>
+      <div class="outcome stop rise">
+        <div class="dia"><svg viewBox="0 0 120 44" aria-hidden="true"><circle cx="18" cy="22" r="12" fill="#edf3fb" stroke="#2f5fa7" stroke-width="1.5"/><circle cx="102" cy="22" r="12" fill="#fbefe5" stroke="#e0894f" stroke-width="1.5"/><path d="M38 22h14M68 22h14" stroke="#d7d7d0" stroke-width="1.6" stroke-linecap="round"/><path d="M56 16l8 12M64 16l-8 12" stroke="#b54a3c" stroke-width="1.7" stroke-linecap="round"/></svg></div>
+        <span class="verb">stop</span>
+        <h3 data-t="o3.t">Both sides changed</h3>
+        <p data-t="o3.d">It stops and tells you the two ways out: <code>push --replace</code> or <code>pull --replace</code>. A Git backup is kept either way.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <div class="intro">
+      <div><div class="label" data-t="b.label">What it packs</div><h2 class="rise" data-t="b.title">The work comes along. <i>Each machine stays itself.</i></h2></div>
+      <p class="rise" data-t="b.lede">Everything travels as one package, encrypted for the receiving device and signed by the sender. The destination is updated in place, so your editor, shells, and dependency folders keep pointing at the same directory.</p>
+    </div>
+    <div class="bag rise">
+      <div>
+        <h3><span data-t="b.in">In the bag</span>01</h3>
+        <ul>
+          <li><svg><use href="#in"/></svg><div><b data-t="b.i1">Staged and unstaged changes</b><span data-t="b.i1d">Kept apart, with binary files and executable bits.</span></div></li>
+          <li><svg><use href="#in"/></svg><div><b data-t="b.i2">Untracked files and missing history</b><span data-t="b.i2d">Only the Git objects the other side does not have yet.</span></div></li>
+          <li><svg><use href="#in"/></svg><div><b data-t="b.i3">Codex and Claude Code sessions</b><span data-t="b.i3d">This project's recent sessions, paths remapped, words untouched.</span></div></li>
+          <li><svg><use href="#in"/></svg><div><b data-t="b.i4">A secret, when you name it</b><span data-t="b.i4d"><code>--include-secret .env</code> travels encrypted, outside Git objects.</span></div></li>
         </ul>
+      </div>
+      <div>
+        <h3><span data-t="b.out">Stays home</span>02</h3>
+        <ul>
+          <li><svg><use href="#out"/></svg><div><b data-t="b.o1">node_modules, caches, build output</b><span data-t="b.o1d">Your local environment is never overwritten.</span></div></li>
+          <li><svg><use href="#out"/></svg><div><b data-t="b.o2">Git config, hooks, remotes, stashes</b><span data-t="b.o2d">The receiving repository keeps its own settings.</span></div></li>
+          <li><svg><use href="#out"/></svg><div><b data-t="b.o3">Agent logins and global databases</b><span data-t="b.o3d">Each agent signs in on each device, as usual.</span></div></li>
+          <li><svg><use href="#out"/></svg><div><b data-t="b.o4">.env and other credential files</b><span data-t="b.o4d">Found, reported, and left alone by default.</span></div></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band white" id="routes">
+  <div class="wrap">
+    <div class="intro">
+      <div><div class="label" data-t="rt.label">Three routes</div><h2 class="rise" data-t="rt.title">Use the machines <i>you already have.</i></h2></div>
+      <p class="rise" data-t="rt.lede">If one device can ssh into the other, you are ready. Run commands from the side that can reach the other one; a laptop can send work to a VPS and bring it back without the VPS ever reaching the laptop.</p>
+    </div>
+    <div class="routes">
+      <article class="rt rise">
+        <div class="rt-top">
+          <svg viewBox="0 0 300 34" preserveAspectRatio="none" aria-hidden="true"><circle cx="10" cy="17" r="6" fill="#1c2230"/><circle cx="290" cy="17" r="6" fill="none" stroke="#1c2230" stroke-width="1.6"/><path d="M22 17h256" stroke="#2f5fa7" stroke-width="1.6"/></svg>
+          <h3 data-t="lan.t">Same network</h3>
+          <p data-t="lan.d">Turn on Remote Login (macOS) or sshd (Linux), copy your key once, and pair.</p>
+        </div>
+        <pre><button class="cp light" type="button" aria-label="Copy"><svg><use href="#copy"/></svg></button>ssh-copy-id me@laptop.local
+onthego device add laptop \
+  --host me@laptop.local --install
+onthego sync laptop</pre>
+      </article>
+      <article class="rt rise">
+        <div class="rt-top">
+          <svg viewBox="0 0 300 34" preserveAspectRatio="none" aria-hidden="true"><circle cx="10" cy="17" r="6" fill="#1c2230"/><circle cx="290" cy="17" r="6" fill="none" stroke="#1c2230" stroke-width="1.6"/><path d="M22 17 C 90 -6, 210 40, 278 17" fill="none" stroke="#2f5fa7" stroke-width="1.8" stroke-dasharray="1 5" stroke-linecap="round"/></svg>
+          <h3 data-t="ts.t">Across networks</h3>
+          <p data-t="ts.d">With Tailscale, pair by device name. onthego tailscale shows your tailnet and what is missing.</p>
+        </div>
+        <pre><button class="cp light" type="button" aria-label="Copy"><svg><use href="#copy"/></svg></button>onthego tailscale
+onthego device add laptop \
+  --tailscale me@laptop --install
+onthego sync laptop</pre>
+      </article>
+      <article class="rt rise">
+        <div class="rt-top">
+          <svg viewBox="0 0 300 34" preserveAspectRatio="none" aria-hidden="true"><circle cx="10" cy="17" r="6" fill="#1c2230"/><rect x="282" y="9" width="16" height="16" rx="3" fill="none" stroke="#1c2230" stroke-width="1.6"/><path d="M22 17h250" stroke="#e0894f" stroke-width="1.6" stroke-dasharray="8 5"/></svg>
+          <h3 data-t="vps.t">To a VPS</h3>
+          <p data-t="vps.d">No Node.js on the server. --install sends the right binary, and device install upgrades it later.</p>
+        </div>
+        <pre><button class="cp light" type="button" aria-label="Copy"><svg><use href="#copy"/></svg></button>onthego device add vps \
+  --host me@vps.example.com --install
+onthego sync vps   <span class="c"># up</span>
+onthego sync vps   <span class="c"># and back</span></pre>
       </article>
     </div>
-    <ol class="steps reveal">
-      <li><h3 data-i18n="s1.t">Capture</h3><p data-i18n="s1.d">Snapshot Git state and this project's agent sessions.</p></li>
-      <li><h3 data-i18n="s2.t">Encrypt</h3><p data-i18n="s2.d">Seal it for the paired device and sign it.</p></li>
-      <li><h3 data-i18n="s3.t">Send</h3><p data-i18n="s3.d">Stream it over your own SSH, LAN or tailnet.</p></li>
-      <li><h3 data-i18n="s4.t">Apply</h3><p data-i18n="s4.d">Update in place. Keep a Git backup of what it replaces.</p></li>
-      <li><h3 data-i18n="s5.t">Resume</h3><p data-i18n="s5.d">Continue the same agent conversation by its ID.</p></li>
-    </ol>
   </div>
 </section>
 
-<section id="demo">
+<section class="band" id="faq">
   <div class="wrap">
-    <div class="head reveal">
-      <span class="kicker" data-i18n="demo.kicker">In your terminal</span>
-      <h2 data-i18n="demo.title">Leave the desk. Keep the thread.</h2>
-      <p data-i18n="demo.sub">Hand off from the desktop, resume on the laptop, and bring it back with the same command.</p>
+    <div class="faqgrid">
+    <div><div class="label">FAQ</div><h2 class="rise" data-t="q.title">Fair questions.</h2></div>
+    <div class="faq">
+      <details><summary data-t="q1">Is this a sync daemon running in the background?</summary><p data-t="a1">No. Handoffs are explicit: you run sync when you switch machines, so you always know which device has the work. Nothing watches your files.</p></details>
+      <details><summary data-t="q2">Do I need an account, a server, or an API key?</summary><p data-t="a2">No. Your devices talk directly over the SSH you already use. There is no relay, no cloud copy, and no AI feature. onthego only moves files.</p></details>
+      <details><summary data-t="q3">What happens if I edit on both machines?</summary><p data-t="a3">sync stops and explains your options. Whichever side you replace is saved first as a Git backup, and onthego undo puts it back.</p></details>
+      <details><summary data-t="q4">Will my .env or tokens end up on the other device?</summary><p data-t="a4">Not by default. Credential files are detected and left behind. If you really want one on the other side, --include-secret carries it encrypted, never inside Git objects.</p></details>
+      <details><summary data-t="q5">Which agents and platforms are supported?</summary><p data-t="a5">Codex CLI and Claude Code, on macOS and Linux (arm64 and amd64). Sessions are resumed by ID with the agent's own resume command; each device signs in to the agent separately.</p></details>
     </div>
-    <div class="terms reveal">
-      <div class="term"><div class="term-bar"><span class="dot" style="--c:var(--codex)"></span>Desktop<small>~/projects/shop</small></div><div class="term-body" id="t-desk" aria-live="polite"></div></div>
-      <div class="term"><div class="term-bar"><span class="dot" style="--c:var(--laptop)"></span>Laptop<small>~/projects/shop</small></div><div class="term-body" id="t-lap" aria-live="polite"></div></div>
-    </div>
-    <div class="term-foot">
-      <span class="status" id="t-status" data-i18n="demo.s0">Press play to watch a handoff.</span>
-      <div class="ctrls">
-        <button class="pill ghost sm" type="button" id="t-play" data-i18n="demo.play">Play</button>
-        <button class="pill ghost sm" type="button" id="t-replay" data-i18n="demo.replay">Replay</button>
-        <button class="pill ghost sm" type="button" id="t-skip" data-i18n="demo.skip">Skip to the end</button>
-      </div>
-    </div>
-    <p class="note" data-i18n="demo.note">A scripted sample with shortened output. Nothing here connects to a real device.</p>
-  </div>
-</section>
-
-<section class="soft" id="sync">
-  <div class="wrap split">
-    <div class="reveal">
-      <span class="kicker" data-i18n="sync.kicker">onthego sync</span>
-      <h2 data-i18n="sync.title">It knows which way to go.</h2>
-      <p class="sub" data-i18n="sync.sub">sync compares both sides with their last handoff and moves work only away from the side that did not change. When both changed, it stops and asks you. Nothing is merged behind your back.</p>
-      <div class="toggles" role="group" aria-label="Situation">
-        <button class="toggle" type="button" aria-pressed="false" data-k="local"><span class="sw"></span><span data-i18n="sync.t1">I changed files on this desktop</span></button>
-        <button class="toggle" type="button" aria-pressed="true" data-k="remote"><span class="sw"></span><span data-i18n="sync.t2">I kept working on the laptop</span></button>
-        <button class="toggle" type="button" aria-pressed="false" data-k="handed"><span class="sw"></span><span data-i18n="sync.t3">I handed the work to the laptop earlier</span></button>
-      </div>
-    </div>
-    <div class="card decide reveal" aria-live="polite">
-      <div class="decide-top"><span data-i18n="sync.on">On the desktop</span><code>onthego sync laptop</code></div>
-      <div class="lanes">
-        <div class="dev" id="d-local"><svg><use href="#i-desktop"/></svg><div>Desktop</div><small></small></div>
-        <svg class="arrow" id="d-arrow" viewBox="0 0 92 24" aria-hidden="true"><line x1="4" y1="12" x2="80" y2="12" stroke="currentColor" stroke-width="2"/><path d="M76 5l9 7-9 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <div class="dev" id="d-remote"><svg><use href="#i-laptop"/></svg><div>Laptop</div><small></small></div>
-      </div>
-      <div class="verdict" id="d-verdict"><b></b><p></p></div>
     </div>
   </div>
 </section>
 
-<section id="connect">
+<section class="closing">
   <div class="wrap">
-    <div class="head reveal">
-      <span class="kicker" data-i18n="con.kicker">Setup in a minute</span>
-      <h2 data-i18n="con.title">Connect the devices you already own.</h2>
-      <p data-i18n="con.sub">If one device can ssh into the other, you are ready. Run commands from the device that can reach the other one.</p>
-    </div>
-    <div class="tabwrap reveal">
-      <div class="tabs" role="tablist" aria-label="Connection type">
-        <button role="tab" id="tab-lan" aria-selected="true" aria-controls="p-lan" data-i18n="con.lan">Same network</button>
-        <button role="tab" id="tab-ts" aria-selected="false" aria-controls="p-ts" tabindex="-1">Tailscale</button>
-        <button role="tab" id="tab-vps" aria-selected="false" aria-controls="p-vps" tabindex="-1">VPS</button>
-      </div>
-      <div class="card panel" role="tabpanel" id="p-lan" aria-labelledby="tab-lan">
-        <ol>
-          <li data-i18n="lan.1">Turn on SSH on the laptop<span>macOS: System Settings &gt; General &gt; Sharing &gt; Remote Login</span></li>
-          <li data-i18n="lan.2">Copy your key once<span>So handoffs never wait for a password.</span></li>
-          <li data-i18n="lan.3">Pair, install, and go<span>--install copies the same onthego version over SSH.</span></li>
-        </ol>
-        <div class="code"><button class="copy" type="button" aria-label="Copy commands"><svg><use href="#i-copy"/></svg></button><span class="c"># inside your project on the desktop</span>
-onthego init
-ssh-copy-id me@laptop.local
-onthego device add laptop --host me@laptop.local --install
-onthego sync laptop</div>
-      </div>
-      <div class="card panel" role="tabpanel" id="p-ts" aria-labelledby="tab-ts" hidden>
-        <ol>
-          <li data-i18n="ts.1">Sign in to Tailscale on both devices<span>Any network works: home, office, café, phone hotspot.</span></li>
-          <li data-i18n="ts.2">See your tailnet<span>onthego tailscale lists devices and what each one still needs.</span></li>
-          <li data-i18n="ts.3">Pair by name<span>The MagicDNS name keeps working when IP addresses change.</span></li>
-        </ol>
-        <div class="code"><button class="copy" type="button" aria-label="Copy commands"><svg><use href="#i-copy"/></svg></button>onthego tailscale
-<span class="c"># Devices on your tailnet:</span>
-<span class="c">#   laptop   macOS   online   laptop.tail1234.ts.net</span>
-onthego device add laptop --tailscale me@laptop --install
-onthego sync laptop</div>
-      </div>
-      <div class="card panel" role="tabpanel" id="p-vps" aria-labelledby="tab-vps" hidden>
-        <ol>
-          <li data-i18n="vps.1">No Node.js needed on the server<span>The npm package carries every platform; --install sends the right one.</span></li>
-          <li data-i18n="vps.2">Drive everything from your laptop<span>The server never has to reach you. sync works in both directions.</span></li>
-          <li data-i18n="vps.3">Upgrade with one command<span>device install brings the server to your version.</span></li>
-        </ol>
-        <div class="code"><button class="copy" type="button" aria-label="Copy commands"><svg><use href="#i-copy"/></svg></button>onthego device add vps --host me@vps.example.com --install
-onthego sync vps          <span class="c"># send the work up</span>
-<span class="c"># ...work on the server...</span>
-onthego sync vps          <span class="c"># bring it back</span>
-onthego device install vps <span class="c"># after upgrading locally</span></div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section class="soft">
-  <div class="wrap">
-    <div class="head reveal">
-      <span class="kicker" data-i18n="mv.kicker">What moves</span>
-      <h2 data-i18n="mv.title">The work travels. The machine stays itself.</h2>
-    </div>
-    <div class="moves reveal">
-      <div class="card"><h3 data-i18n="mv.go">Travels with you</h3><ul>
-        <li><svg><use href="#i-yes"/></svg><div data-i18n="mv.g1">Staged and unstaged changes<small>Kept separate, with binary files and executable bits.</small></div></li>
-        <li><svg><use href="#i-yes"/></svg><div data-i18n="mv.g2">Untracked files and missing Git history<small>Only the objects the other side does not have.</small></div></li>
-        <li><svg><use href="#i-yes"/></svg><div data-i18n="mv.g3">Codex and Claude Code sessions<small>Recent sessions for this project, paths remapped, content untouched.</small></div></li>
-        <li><svg><use href="#i-yes"/></svg><div data-i18n="mv.g4">Secrets, only when you ask<small>--include-secret .env travels encrypted, outside Git objects.</small></div></li>
-      </ul></div>
-      <div class="card"><h3 data-i18n="mv.stay">Stays on each device</h3><ul>
-        <li><svg><use href="#i-stay"/></svg><div data-i18n="mv.s1">node_modules, caches, build output<small>Your local environment is never overwritten.</small></div></li>
-        <li><svg><use href="#i-stay"/></svg><div data-i18n="mv.s2">Git config, hooks, remotes, stashes<small>The destination repository keeps its own settings.</small></div></li>
-        <li><svg><use href="#i-stay"/></svg><div data-i18n="mv.s3">Agent logins and global databases<small>Sign in to each agent on each device, as usual.</small></div></li>
-        <li><svg><use href="#i-stay"/></svg><div data-i18n="mv.s4">.env and other credential files<small>Detected and reported, never sent by default.</small></div></li>
-      </ul></div>
-    </div>
-  </div>
-</section>
-
-<section>
-  <div class="wrap princ">
-    <h2 class="reveal" data-i18n="pr.title">No account. No server. <em>No AI.</em></h2>
-    <ul class="reveal">
-      <li data-i18n="pr.1"><b>Direct.</b>Your devices talk over your own SSH. There is no relay, no cloud copy, no sign-up.</li>
-      <li data-i18n="pr.2"><b>Encrypted and pinned.</b>Every package is encrypted for the receiving device and signed by the sender. A device that changes keys is rejected.</li>
-      <li data-i18n="pr.3"><b>Never silently merged.</b>When both sides changed, onthego stops. Anything replaced is kept as a Git backup that onthego undo restores.</li>
-      <li data-i18n="pr.4"><b>Small and open.</b>One MIT-licensed binary for macOS and Linux. It moves your files; it does not think for you.</li>
-    </ul>
-  </div>
-</section>
-
-<section class="soft final">
-  <div class="wrap">
-    <h2 class="reveal" data-i18n="final.title">Your work.<br><em>On every device.</em></h2>
-    <div class="install" style="margin:0 auto 22px">
-      <span class="prompt">$</span><code>npm install -g @jbaehova/onthego</code>
-      <button class="copy" type="button" data-copy="npm install -g @jbaehova/onthego" aria-label="Copy install command"><svg><use href="#i-copy"/></svg></button>
-    </div>
-    <div class="cta">
-      <a class="pill primary" href="https://github.com/peerproblem/onthego#quick-start"><span data-i18n="final.start">Read the quick start</span><svg><use href="#i-out"/></svg></a>
-      <a class="pill ghost" href="https://github.com/peerproblem/onthego"><span data-i18n="final.star">Star on GitHub</span><svg><use href="#i-out"/></svg></a>
+    <h2 class="rise" data-t="c.title">Close the lid. <i>Keep the thread.</i></h2>
+    <div class="side rise">
+      <p data-t="c.lede">Install once. Pair a device. Run one command whenever you move.</p>
+      <div class="cmd"><span>npm install -g @jbaehova/onthego</span><button class="cp" type="button" data-copy="npm install -g @jbaehova/onthego" aria-label="Copy"><svg><use href="#copy"/></svg></button></div>
+      <a class="link" href="https://github.com/peerproblem/onthego" data-t="c.gh">Read the docs on GitHub</a>
     </div>
   </div>
 </section>
@@ -515,10 +440,10 @@ onthego device install vps <span class="c"># after upgrading locally</span></div
 
 <footer>
   <div class="wrap">
-    <a class="brand" href="#top" style="font-size:18px"><svg viewBox="0 0 32 32" aria-hidden="true" style="width:22px;height:22px"><rect x="11" y="3" width="18" height="18" rx="5" fill="none" stroke="#9fbbe0" stroke-width="2"/><rect x="3" y="11" width="18" height="18" rx="5" fill="#406ba6"/><path d="M7.5 20h9m-3.5-3.5L16.5 20 13 23.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>onthego</a>
-    <span data-i18n="foot.tag">Carry the work. Keep the context.</span>
+    <a class="logo" href="#" style="font-size:15px"><svg viewBox="0 0 24 24" aria-hidden="true" style="width:20px;height:20px"><circle cx="5" cy="12" r="3.2" fill="#1c2230"/><circle cx="19" cy="12" r="3.2" fill="none" stroke="#1c2230" stroke-width="1.8"/><path d="M8.6 12h6.2" stroke="#2f5fa7" stroke-width="1.8" stroke-linecap="round" stroke-dasharray="1.6 2.4"/></svg>onthego</a>
+    <span data-t="foot">MIT licensed. Made for people with more than one computer.</span>
     <nav aria-label="Footer">
-      <a href="https://github.com/peerproblem/onthego#readme" data-i18n="foot.docs">Docs</a>
+      <a href="https://github.com/peerproblem/onthego#readme">Docs</a>
       <a href="https://github.com/peerproblem/onthego/blob/main/docs/tailscale.md">Tailscale</a>
       <a href="https://github.com/peerproblem/onthego/releases">Releases</a>
       <a href="https://www.npmjs.com/package/@jbaehova/onthego">npm</a>
@@ -529,258 +454,93 @@ onthego device install vps <span class="c"># after upgrading locally</span></div
 <script>
 (() => {
   const ko = {
-    "nav.how": "작동 방식", "nav.setup": "설정", "nav.install": "설치",
-    "hero.badge": "오픈소스 CLI", "hero.badge2": "Codex와 Claude Code용",
-    "hero.title": "하던 작업 그대로, <em>어느 기기에서든.</em>",
-    "hero.lede": "끝내지 못한 Git 작업과 코딩 에이전트 대화를 데스크탑, 노트북, VPS 사이에서 명령 하나로 옮기세요. 멈춘 그 자리에서 바로 이어집니다.",
-    "hero.install": "설치하기", "hero.see": "동작 보기",
-    "how.kicker": "숙제 말고, 인계", "how.title": "멈춘 곳에서 그대로 이어서.",
-    "how.sub": "기기를 바꾸면 보통 임시 커밋, push, pull을 거치고 에이전트에게 처음부터 다시 설명해야 합니다. onthego는 작업 상태 전체를 옮깁니다. staged, unstaged, untracked 변경과 함께 Codex, Claude Code와 나누던 세션까지요.",
-    "how.agent": "에이전트 세션", "how.usual": "커밋하고 push", "how.usualTag": "흔한 방법", "how.otgTag": "명령 하나",
-    "how.r1": "미완성 작업", "how.r2": "에이전트 맥락", "how.r3": "거쳐 가는 곳",
-    "how.u1": "WIP 커밋 하나로 뭉개짐", "how.u2": "두고 감. 다시 설명해야 함", "how.u3": "Git 호스팅과 커밋 기록",
-    "how.o1": "staged, unstaged, untracked 그대로", "how.o2": "Codex, Claude 세션을 바로 재개", "how.o3": "없음. SSH로 기기 간 직접 전송",
-    "s1.t": "캡처", "s1.d": "Git 상태와 이 프로젝트의 에이전트 세션을 담습니다.",
-    "s2.t": "암호화", "s2.d": "페어링된 기기만 열 수 있게 봉인하고 서명합니다.",
-    "s3.t": "전송", "s3.d": "내 SSH로 보냅니다. 같은 네트워크든 tailnet이든.",
-    "s4.t": "적용", "s4.d": "제자리에서 갱신하고, 바뀌는 부분은 Git 백업으로 남깁니다.",
-    "s5.t": "재개", "s5.d": "같은 에이전트 대화를 세션 ID로 이어갑니다.",
-    "demo.kicker": "터미널에서", "demo.title": "자리를 떠나도, 흐름은 그대로.",
-    "demo.sub": "데스크탑에서 넘기고, 노트북에서 이어가고, 같은 명령으로 다시 가져옵니다.",
-    "demo.s0": "재생을 눌러 인계 과정을 보세요.", "demo.play": "재생", "demo.pause": "일시정지", "demo.replay": "다시 보기", "demo.skip": "끝으로 건너뛰기",
-    "demo.note": "출력을 줄인 시연용 스크립트입니다. 실제 기기에 연결하지 않습니다.",
-    "demo.s1": "데스크탑에서 노트북으로 넘깁니다.", "demo.s2": "노트북에서 같은 작업과 대화를 이어갑니다.", "demo.s3": "데스크탑으로 돌아와 같은 명령으로 가져옵니다.", "demo.s4": "끝. 두 기기가 같은 상태입니다.",
-    "sync.kicker": "onthego sync", "sync.title": "방향은 알아서 정합니다.",
-    "sync.sub": "sync는 양쪽을 마지막 인계 시점과 비교하고, 바뀌지 않은 쪽에서만 작업을 옮깁니다. 둘 다 바뀌었으면 멈추고 물어봅니다. 몰래 합치는 일은 없습니다.",
-    "sync.t1": "이 데스크탑에서 파일을 바꿨다", "sync.t2": "노트북에서 작업을 이어갔다", "sync.t3": "아까 노트북으로 작업을 넘겼다", "sync.on": "데스크탑에서",
-    "con.kicker": "1분 설정", "con.title": "이미 가진 기기들을 연결하세요.",
-    "con.sub": "한 기기에서 다른 기기로 ssh 접속만 되면 준비 끝입니다. 명령은 상대에게 접속할 수 있는 쪽에서 실행하세요.",
-    "con.lan": "같은 네트워크",
-    "lan.1": "노트북에서 SSH 켜기<span>macOS: 시스템 설정 &gt; 일반 &gt; 공유 &gt; 원격 로그인</span>",
-    "lan.2": "키를 한 번 복사<span>인계할 때 비밀번호를 묻지 않도록.</span>",
-    "lan.3": "페어링, 설치, 출발<span>--install이 같은 버전의 onthego를 SSH로 복사합니다.</span>",
-    "ts.1": "두 기기에서 Tailscale 로그인<span>집, 사무실, 카페, 핫스팟 어디서든.</span>",
-    "ts.2": "tailnet 확인<span>onthego tailscale이 기기 목록과 남은 설정을 보여줍니다.</span>",
-    "ts.3": "이름으로 페어링<span>IP가 바뀌어도 MagicDNS 이름은 그대로입니다.</span>",
-    "vps.1": "서버에 Node.js 불필요<span>npm 패키지에 모든 플랫폼이 들어 있고, --install이 맞는 것을 보냅니다.</span>",
-    "vps.2": "모든 명령은 노트북에서<span>서버가 내 쪽에 접속할 필요가 없습니다. sync는 양방향입니다.</span>",
-    "vps.3": "업그레이드도 한 줄<span>device install로 서버를 내 버전에 맞춥니다.</span>",
-    "mv.kicker": "옮겨지는 것", "mv.title": "작업은 따라오고, 기기는 그대로.",
-    "mv.go": "함께 옮겨지는 것", "mv.stay": "각 기기에 남는 것",
-    "mv.g1": "staged와 unstaged 변경<small>구분을 유지하고, 바이너리와 실행 권한도 그대로.</small>",
-    "mv.g2": "untracked 파일과 없는 Git 기록<small>상대에게 없는 객체만 보냅니다.</small>",
-    "mv.g3": "Codex와 Claude Code 세션<small>이 프로젝트의 최근 세션. 경로만 바꾸고 내용은 그대로.</small>",
-    "mv.g4": "비밀 파일은 요청할 때만<small>--include-secret .env는 Git 객체 밖에서 암호화되어 이동합니다.</small>",
-    "mv.s1": "node_modules, 캐시, 빌드 결과물<small>로컬 환경을 덮어쓰지 않습니다.</small>",
-    "mv.s2": "Git 설정, 훅, 원격, stash<small>받는 쪽 저장소는 자기 설정을 유지합니다.</small>",
-    "mv.s3": "에이전트 로그인과 전역 DB<small>각 기기에서 평소처럼 로그인하세요.</small>",
-    "mv.s4": ".env 같은 자격 증명 파일<small>감지해서 알려주고, 기본으로는 보내지 않습니다.</small>",
-    "pr.title": "계정도, 서버도, <em>AI도 없습니다.</em>",
-    "pr.1": "<b>직접 연결.</b>내 SSH로 기기끼리 바로 통신합니다. 중계 서버, 클라우드 사본, 가입이 없습니다.",
-    "pr.2": "<b>암호화와 신원 고정.</b>모든 패키지는 받는 기기용으로 암호화되고 보내는 쪽이 서명합니다. 키가 바뀐 기기는 거부합니다.",
-    "pr.3": "<b>몰래 합치지 않음.</b>양쪽이 모두 바뀌면 멈춥니다. 덮어쓴 내용은 Git 백업으로 남고 onthego undo로 되돌립니다.",
-    "pr.4": "<b>작고 열려 있음.</b>macOS와 Linux용 MIT 라이선스 바이너리 하나. 파일을 옮길 뿐, 대신 생각하지 않습니다.",
-    "final.title": "하던 작업 그대로,<br><em>어느 기기에서든.</em>", "final.start": "빠른 시작 읽기", "final.star": "GitHub에서 Star",
-    "foot.tag": "작업은 옮기고, 맥락은 지킵니다.", "foot.docs": "문서"
+    "nav.sync": "sync 동작", "nav.routes": "설정",
+    "hero.label": "Codex와 Claude Code를 위한 오픈소스 CLI",
+    "hero.title": "책상에서 시작하고, <i>어디서든 마무리하세요.</i>",
+    "hero.lede": "onthego는 끝내지 못한 Git 작업과 그 작업에 딸린 에이전트 대화를 내 기기에서 다른 기기로 넘겨줍니다. 노트북을 열면 같은 세션이 그대로 이어집니다.",
+    "hero.qs": "빠른 시작", "f1": "계정 없음", "f2": "서버 없음", "f3": "내 SSH 그대로",
+    "t.head": "인계", "t.from": "출발", "t.to": "도착", "t.packed": "담긴 것", "t.session": "세션",
+    "t.home": "두고 가는 것:", "t.sig": "노트북용 암호화, 데스크탑 서명", "t.stamp": "전달됨",
+    "r1": "시작하는 곳", "r2": "이어가는 곳", "r3": "오래 돌리는 곳",
+    "s.label": "명령 하나", "s.title": "문장처럼 읽히고, <i>신중하게 판단합니다.</i>",
+    "s.lede": "방향을 고를 필요가 없습니다. sync는 마지막 인계 이후 양쪽에서 무엇이 바뀌었는지 보고, 바뀌지 않은 쪽에서만 작업을 옮깁니다. 둘 다 바뀌었으면 멈추고 묻습니다. 몰래 합치는 일은 없습니다.",
+    "p1": "도구", "p2": "판단하고 옮김", "p3": "페어링한 기기",
+    "o1.t": "이쪽만 바뀌었을 때", "o1.d": "새 작업이 나누던 세션과 함께 상대 기기로 갑니다.",
+    "o2.t": "저쪽만 바뀌었을 때", "o2.d": "작업을 이쪽으로 가져옵니다. 넘겨준 작업을 다시 받아오고 싶을 때도 같습니다.",
+    "o3.t": "양쪽 다 바뀌었을 때", "o3.d": "멈추고 두 가지 선택지를 알려줍니다. <code>push --replace</code> 또는 <code>pull --replace</code>. 어느 쪽이든 Git 백업이 남습니다.",
+    "b.label": "챙기는 것", "b.title": "작업은 따라오고, <i>기기는 그대로입니다.</i>",
+    "b.lede": "모든 것이 받는 기기용으로 암호화되고 보내는 쪽이 서명한 패키지 하나로 이동합니다. 받는 쪽은 제자리에서 갱신되어 에디터, 셸, 의존성 폴더가 같은 디렉터리를 그대로 가리킵니다.",
+    "b.in": "챙겨 가는 것", "b.out": "두고 가는 것",
+    "b.i1": "staged와 unstaged 변경", "b.i1d": "구분을 유지하고, 바이너리와 실행 권한까지 그대로.",
+    "b.i2": "untracked 파일과 없는 Git 기록", "b.i2d": "상대에게 아직 없는 Git 객체만 보냅니다.",
+    "b.i3": "Codex와 Claude Code 세션", "b.i3d": "이 프로젝트의 최근 세션. 경로만 바꾸고 대화 내용은 그대로.",
+    "b.i4": "비밀 파일은 지정할 때만", "b.i4d": "<code>--include-secret .env</code>는 Git 객체 밖에서 암호화되어 이동합니다.",
+    "b.o1": "node_modules, 캐시, 빌드 결과물", "b.o1d": "로컬 환경을 덮어쓰지 않습니다.",
+    "b.o2": "Git 설정, 훅, 원격, stash", "b.o2d": "받는 쪽 저장소는 자기 설정을 유지합니다.",
+    "b.o3": "에이전트 로그인과 전역 DB", "b.o3d": "에이전트 로그인은 기기마다 평소처럼.",
+    "b.o4": ".env 같은 자격 증명 파일", "b.o4d": "찾아서 알려주고, 기본으로는 두고 갑니다.",
+    "rt.label": "세 가지 경로", "rt.title": "이미 가진 기기들로 <i>충분합니다.</i>",
+    "rt.lede": "한 기기에서 다른 기기로 ssh 접속만 되면 준비 끝입니다. 명령은 상대에게 닿을 수 있는 쪽에서 실행하세요. 노트북은 VPS로 작업을 보내고 다시 가져올 수 있고, VPS가 노트북에 접속할 필요는 없습니다.",
+    "lan.t": "같은 네트워크", "lan.d": "원격 로그인(macOS)이나 sshd(Linux)를 켜고, 키를 한 번 복사한 뒤 페어링합니다.",
+    "ts.t": "다른 네트워크", "ts.d": "Tailscale이 있으면 기기 이름으로 페어링합니다. onthego tailscale이 tailnet과 빠진 설정을 보여줍니다.",
+    "vps.t": "VPS로", "vps.d": "서버에 Node.js가 필요 없습니다. --install이 맞는 바이너리를 보내고, 나중에는 device install로 업그레이드합니다.",
+    "q.title": "궁금할 만한 것들.",
+    "q1": "백그라운드에서 계속 도는 동기화 데몬인가요?", "a1": "아닙니다. 인계는 명시적입니다. 기기를 옮길 때 sync를 실행하니 지금 어느 기기가 작업을 갖고 있는지 늘 분명합니다. 파일을 감시하는 프로세스도 없습니다.",
+    "q2": "계정이나 서버, API 키가 필요한가요?", "a2": "필요 없습니다. 이미 쓰는 SSH로 기기끼리 직접 통신합니다. 중계 서버, 클라우드 사본, AI 기능이 없습니다. onthego는 파일을 옮길 뿐입니다.",
+    "q3": "두 기기에서 모두 수정하면 어떻게 되나요?", "a3": "sync가 멈추고 선택지를 알려줍니다. 어느 쪽을 덮어쓰든 먼저 Git 백업으로 남기고, onthego undo로 되돌릴 수 있습니다.",
+    "q4": ".env나 토큰이 다른 기기로 넘어가지 않나요?", "a4": "기본으로는 보내지 않습니다. 자격 증명 파일은 감지해서 두고 갑니다. 꼭 필요하면 --include-secret으로 암호화해서 보내며, Git 객체에는 들어가지 않습니다.",
+    "q5": "어떤 에이전트와 플랫폼을 지원하나요?", "a5": "Codex CLI와 Claude Code, macOS와 Linux(arm64, amd64)를 지원합니다. 세션은 에이전트 자체의 resume 명령으로 ID를 지정해 이어가며, 에이전트 로그인은 기기마다 따로 합니다.",
+    "c.title": "노트북을 덮어도, <i>흐름은 이어집니다.</i>", "c.lede": "한 번 설치하고, 기기를 페어링하고, 옮길 때마다 명령 하나.", "c.gh": "GitHub에서 문서 보기",
+    "foot": "MIT 라이선스. 컴퓨터가 한 대보다 많은 사람들을 위해."
   };
   const en = {};
-  document.querySelectorAll("[data-i18n]").forEach((el) => { en[el.dataset.i18n] = el.innerHTML; });
-  Object.assign(en, {
-    "demo.pause": "Pause", "demo.s1": "Handing off from the desktop to the laptop.", "demo.s2": "Same work, same conversation, on the laptop.",
-    "demo.s3": "Back at the desk, the same command brings it home.", "demo.s4": "Done. Both devices match."
-  });
+  document.querySelectorAll("[data-t]").forEach((el) => { en[el.dataset.t] = el.innerHTML; });
   let lang = "en";
-  const t = (k) => (lang === "ko" ? ko[k] : en[k]) ?? en[k] ?? k;
-  const select = document.getElementById("lang");
-  function apply(next) {
+  const setLang = (next) => {
     lang = next === "ko" ? "ko" : "en";
     document.documentElement.lang = lang;
-    select.value = lang;
-    document.querySelectorAll("[data-i18n]").forEach((el) => { el.innerHTML = t(el.dataset.i18n); });
-    updatePlay();
-    renderDecision();
+    document.querySelectorAll("[data-t]").forEach((el) => { const v = (lang === "ko" ? ko : en)[el.dataset.t]; if (v !== undefined) el.innerHTML = v; });
+    document.querySelectorAll("[data-lang]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.lang === lang));
     try { localStorage.setItem("otg-lang", lang); } catch (_) {}
-  }
-  select.addEventListener("change", () => apply(select.value));
-
-  // Copy buttons
-  document.querySelectorAll(".copy").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      let text = btn.dataset.copy;
-      if (!text) {
-        text = btn.parentElement.textContent.split("\n").map((l) => l.replace(/\s+#.*$/, "").replace(/^#.*$/, "")).filter((l) => l.trim()).join("\n").trim();
-      }
-      try { await navigator.clipboard.writeText(text); } catch (_) { return; }
-      btn.classList.add("done");
-      btn.innerHTML = '<svg><use href="#i-check"/></svg>';
-      setTimeout(() => { btn.classList.remove("done"); btn.innerHTML = '<svg><use href="#i-copy"/></svg>'; }, 1400);
-    });
-  });
-
-  // Nav border
-  const nav = document.getElementById("nav");
-  addEventListener("scroll", () => nav.classList.toggle("scrolled", scrollY > 8), { passive: true });
-
-  // Reveal on scroll
-  const io = "IntersectionObserver" in window ? new IntersectionObserver((entries) => {
-    entries.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } });
-  }, { rootMargin: "0px 0px -40px 0px" }) : null;
-  document.querySelectorAll(".reveal").forEach((el) => io ? io.observe(el) : el.classList.add("in"));
-
-  // Tabs
-  const tabs = [...document.querySelectorAll('[role="tab"]')];
-  function selectTab(tab) {
-    tabs.forEach((x) => {
-      const on = x === tab;
-      x.setAttribute("aria-selected", on);
-      x.tabIndex = on ? 0 : -1;
-      document.getElementById(x.getAttribute("aria-controls")).hidden = !on;
-    });
-  }
-  tabs.forEach((tab, i) => {
-    tab.addEventListener("click", () => selectTab(tab));
-    tab.addEventListener("keydown", (e) => {
-      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
-      const next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
-      selectTab(next); next.focus();
-    });
-  });
-
-  // Sync decision
-  const state = { local: false, remote: true, handed: false };
-  const toggles = [...document.querySelectorAll(".toggle")];
-  toggles.forEach((b) => b.addEventListener("click", () => {
-    state[b.dataset.k] = !state[b.dataset.k];
-    b.setAttribute("aria-pressed", state[b.dataset.k]);
-    renderDecision();
-  }));
-  const text = {
-    en: {
-      push: ["Push to the laptop", "Only this desktop changed, so its work goes to the laptop."],
-      pull: ["Pull from the laptop", "Only the laptop changed, so its work comes back here."],
-      back: ["Take it back", "You handed the work off and did not touch it here, so sync pulls it home."],
-      none: ["Already in sync", "Nothing changed on either side. Nothing to move."],
-      stop: ["Stop and ask you", "Both sides changed. Choose <code>push --replace</code> or <code>pull --replace</code>. A Git backup is kept either way."],
-      changed: "changed", handed: "handed off"
-    },
-    ko: {
-      push: ["노트북으로 push", "이 데스크탑만 바뀌었으니 작업을 노트북으로 보냅니다."],
-      pull: ["노트북에서 pull", "노트북만 바뀌었으니 작업을 이쪽으로 가져옵니다."],
-      back: ["다시 가져오기", "작업을 넘긴 뒤 여기서는 손대지 않았으니 sync가 가져옵니다."],
-      none: ["이미 같은 상태", "양쪽 다 바뀐 게 없어서 옮길 것이 없습니다."],
-      stop: ["멈추고 물어봄", "양쪽이 모두 바뀌었습니다. <code>push --replace</code> 또는 <code>pull --replace</code> 중에서 고르세요. 어느 쪽이든 Git 백업이 남습니다."],
-      changed: "변경됨", handed: "넘겨줌"
-    }
   };
-  function renderDecision() {
-    const L = text[lang];
-    let key = "none";
-    if (state.local && state.remote) key = "stop";
-    else if (state.local) key = "push";
-    else if (state.remote) key = "pull";
-    else if (state.handed) key = "back";
-    const arrow = document.getElementById("d-arrow");
-    arrow.setAttribute("class", "arrow " + (key === "push" ? "" : key === "pull" || key === "back" ? "left" : key));
-    const dl = document.getElementById("d-local"), dr = document.getElementById("d-remote");
-    dl.classList.toggle("changed", state.local);
-    dr.classList.toggle("changed", state.remote);
-    dl.querySelector("small").textContent = state.local ? L.changed : state.handed ? L.handed : "";
-    dr.querySelector("small").textContent = state.remote ? L.changed : "";
-    const v = document.getElementById("d-verdict");
-    v.className = "verdict" + (key === "stop" ? " stop" : "");
-    v.querySelector("b").textContent = L[key][0];
-    v.querySelector("p").innerHTML = L[key][1];
-  }
+  document.querySelectorAll("[data-lang]").forEach((b) => b.addEventListener("click", () => setLang(b.dataset.lang)));
 
-  // Terminal demo
-  const desk = document.getElementById("t-desk"), lap = document.getElementById("t-lap");
-  const status = document.getElementById("t-status"), playBtn = document.getElementById("t-play");
-  const script = [
-    { s: "demo.s1" },
-    { w: desk, cmd: "onthego sync laptop" },
-    { w: desk, out: '<span class="dim">Sync: push (this device has new work)</span>' },
-    { w: desk, out: '<span class="ok">Sent to laptop</span> → ~/projects/shop' },
-    { w: desk, out: "Agent histories: 1 imported, 0 updated, 0 unchanged." },
-    { w: desk, out: '<span class="hl">Resume: codex resume 0199a88c</span>', pause: 900 },
-    { s: "demo.s2" },
-    { w: lap, cmd: "cd ~/projects/shop && git status --short" },
-    { w: lap, out: 'M  src/checkout.ts\n M src/retry.ts\n?? notes/refund-plan.md' },
-    { w: lap, cmd: "codex resume 0199a88c" },
-    { w: lap, out: '<span class="agent">You: where were we?</span>\n<span class="agent">Codex: We added the retry key in checkout.ts and were about to test refunds.</span>', pause: 1200 },
-    { w: lap, out: '<span class="dim">…laptop work…</span>' },
-    { s: "demo.s3" },
-    { w: desk, cmd: "onthego sync laptop" },
-    { w: desk, out: '<span class="dim">Sync: pull (laptop has new work)</span>' },
-    { w: desk, out: '<span class="ok">Received from laptop</span> → ~/projects/shop' },
-    { w: desk, out: "Previous workspace preserved in a Git backup; onthego undo restores it." },
-    { w: desk, cmd: "onthego status" },
-    { w: desk, out: "~/projects/shop\nunchanged since last transfer" },
-    { s: "demo.s4", end: true }
-  ];
-  let step = 0, running = false, timer = null, statusKey = "demo.s0";
+  document.querySelectorAll(".cp").forEach((btn) => btn.addEventListener("click", async () => {
+    let text = btn.dataset.copy;
+    if (!text) text = btn.parentElement.textContent.split("\n").map((l) => l.replace(/\s+#.*$/, "")).join("\n").trim();
+    try { await navigator.clipboard.writeText(text); } catch (_) { return; }
+    btn.classList.add("ok"); btn.innerHTML = '<svg><use href="#tick"/></svg>';
+    setTimeout(() => { btn.classList.remove("ok"); btn.innerHTML = '<svg><use href="#copy"/></svg>'; }, 1400);
+  }));
+
+  const top = document.getElementById("top");
+  addEventListener("scroll", () => top.classList.toggle("line", scrollY > 6), { passive: true });
+
+  const els = document.querySelectorAll(".rise");
+  if ("IntersectionObserver" in window) {
+    const io = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }), { rootMargin: "0px 0px -40px 0px" });
+    els.forEach((el) => io.observe(el));
+  } else els.forEach((el) => el.classList.add("in"));
+
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  function caret(w) { document.querySelectorAll(".caret").forEach((c) => c.remove()); if (w) { const c = document.createElement("span"); c.className = "caret"; w.appendChild(c); } }
-  function line(w, html, cls) {
-    const d = document.createElement("div");
-    if (cls) d.className = cls;
-    d.innerHTML = html;
-    w.appendChild(d);
-    while (w.scrollHeight > w.clientHeight && w.children.length > 1) w.removeChild(w.firstChild);
-    return d;
-  }
-  function setStatus(k) { statusKey = k; status.textContent = t(k); }
-  function updatePlay() {
-    playBtn.textContent = running ? t("demo.pause") : t("demo.play");
-    if (status) status.textContent = t(statusKey);
-  }
-  function run() {
-    if (!running) return;
-    if (step >= script.length) { running = false; caret(null); updatePlay(); return; }
-    const item = script[step++];
-    if (item.s) { setStatus(item.s); timer = setTimeout(run, 500); if (item.end) { running = false; caret(null); updatePlay(); } return; }
-    if (item.cmd) {
-      const d = line(item.w, "", "cmd");
-      let i = 0;
-      const type = () => {
-        if (!running) { d.textContent = item.cmd; return; }
-        d.textContent = item.cmd.slice(0, ++i);
-        d.appendChild(Object.assign(document.createElement("span"), { className: "caret" }));
-        if (i < item.cmd.length) timer = setTimeout(type, reduced ? 0 : 38);
-        else { d.querySelector(".caret").remove(); timer = setTimeout(run, 420); }
-      };
-      caret(null); type();
-      return;
-    }
-    line(item.w, item.out);
-    caret(item.w);
-    timer = setTimeout(run, item.pause || 320);
-  }
-  function reset() { clearTimeout(timer); running = false; step = 0; desk.innerHTML = ""; lap.innerHTML = ""; setStatus("demo.s0"); caret(desk); updatePlay(); }
-  playBtn.addEventListener("click", () => {
-    if (running) { running = false; clearTimeout(timer); updatePlay(); return; }
-    if (step >= script.length) reset();
-    running = true; updatePlay(); run();
-  });
-  document.getElementById("t-replay").addEventListener("click", () => { reset(); running = true; updatePlay(); run(); });
-  document.getElementById("t-skip").addEventListener("click", () => {
-    clearTimeout(timer); running = false; desk.innerHTML = ""; lap.innerHTML = "";
-    script.forEach((item) => { if (item.cmd) line(item.w, "", "cmd").textContent = item.cmd; else if (item.out) line(item.w, item.out); });
-    step = script.length; setStatus("demo.s4"); caret(null); updatePlay();
-  });
-  // Autoplay once when the demo scrolls into view.
-  const demo = document.getElementById("demo");
-  if ("IntersectionObserver" in window && !reduced) {
-    const auto = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) { auto.disconnect(); if (!running && step === 0) { running = true; updatePlay(); run(); } }
-    }, { threshold: 0.45 });
-    auto.observe(demo);
-  }
+  if (reduced) document.querySelectorAll("animateMotion").forEach((a) => a.remove());
+  const ticket = document.getElementById("ticket");
+  let hold = null;
+  const send = () => {
+    clearTimeout(hold);
+    if (ticket.classList.contains("sent")) { ticket.classList.remove("sent"); return; }
+    const now = new Date();
+    document.getElementById("stamp-time").textContent = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
+    ticket.classList.add("sent");
+    hold = setTimeout(() => ticket.classList.remove("sent"), 4200);
+  };
+  document.getElementById("go").addEventListener("click", send);
+  if (!reduced) setTimeout(send, 1600);
 
   let saved = null;
   try { saved = localStorage.getItem("otg-lang"); } catch (_) {}
-  const params = new URLSearchParams(location.search).get("lang");
-  apply(params || saved || ((navigator.language || "").toLowerCase().startsWith("ko") ? "ko" : "en"));
-  reset();
+  const q = new URLSearchParams(location.search).get("lang");
+  setLang(q || saved || ((navigator.language || "").toLowerCase().startsWith("ko") ? "ko" : "en"));
 })();
 </script>
 </body>
