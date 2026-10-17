@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- Source for onthego-sync.png. Render with:
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --hide-scrollbars \
+    --force-device-scale-factor=2 --window-size=1600,520 --screenshot=assets/onthego-sync.png assets/sync.html -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; width: 1600px; height: 520px; overflow: hidden; background: #fff; }
+  body { color: #0b0b0c; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; display: grid; grid-template-columns: repeat(3, 1fr); gap: 34px; padding: 50px 64px 60px; box-sizing: border-box; }
+  .t { border: 3px solid #0b0b0c; border-radius: 28px; box-shadow: 9px 9px 0 #0b0b0c; padding: 30px 32px; display: flex; flex-direction: column; }
+  .t:nth-child(1) { background: #b9e6ff; transform: rotate(-1.4deg); }
+  .t:nth-child(2) { background: #d6ff3c; transform: rotate(1deg); }
+  .t:nth-child(3) { background: #ff6a2b; transform: rotate(-.8deg); }
+  .g { font-weight: 700; font-size: 130px; line-height: .8; letter-spacing: -.08em; margin-bottom: auto; }
+  .v { align-self: flex-start; background: #0b0b0c; color: #fff; font: 700 20px/1 "JetBrains Mono", monospace; padding: 8px 14px; border-radius: 999px; margin: 24px 0 16px; }
+  h3 { margin: 0 0 10px; font-size: 38px; line-height: 1; letter-spacing: -.05em; }
+  p { margin: 0; font-size: 21px; line-height: 1.35; letter-spacing: -.01em; }
+  code { font: 700 18px "JetBrains Mono", monospace; background: rgba(255,255,255,.6); padding: 1px 6px; border-radius: 6px; }
+</style>
+</head>
+<body>
+  <div class="t"><div class="g">→</div><span class="v">push</span><h3>Only here changed</h3><p>Your work and its agent sessions go to the other device.</p></div>
+  <div class="t"><div class="g">←</div><span class="v">pull</span><h3>Only there changed</h3><p>It brings everything back. Also when you handed work off.</p></div>
+  <div class="t"><div class="g">✕</div><span class="v">stop</span><h3>Both changed</h3><p>Nothing is merged. Pick <code>push --replace</code> or <code>pull --replace</code>; a backup is kept.</p></div>
+</body>
+</html>
