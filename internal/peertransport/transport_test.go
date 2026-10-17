@@ -266,3 +266,43 @@ func TestDiscoverBinaryUsesRemoteLoginShell(t *testing.T) {
 		t.Fatalf("discovery = %q, %v", found, err)
 	}
 }
+
+func TestPlatformNames(t *testing.T) {
+	for _, tc := range []struct{ kernel, machine, want string }{
+		{"Linux", "x86_64", "linux-amd64"}, {"Linux", "aarch64", "linux-arm64"}, {"Darwin", "arm64", "darwin-arm64"}, {"Darwin", "x86_64", "darwin-amd64"},
+	} {
+		if got, err := Platform(tc.kernel, tc.machine); err != nil || got != tc.want {
+			t.Fatalf("%s %s: %s %v", tc.kernel, tc.machine, got, err)
+		}
+	}
+	for _, bad := range [][2]string{{"FreeBSD", "amd64"}, {"Linux", "riscv64"}} {
+		if _, err := Platform(bad[0], bad[1]); err == nil {
+			t.Fatalf("%v accepted", bad)
+		}
+	}
+}
+
+func TestClassifySSHFailures(t *testing.T) {
+	transport := &Transport{Endpoint: Endpoint{Host: "laptop"}}
+	exit := exec.Command("sh", "-c", "exit 255").Run()
+	for diagnostic, want := range map[string]string{
+		"ssh: Could not resolve hostname laptop: nodename nor servname provided":                                           "E_TARGET_UNAVAILABLE",
+		"me@laptop: Permission denied (publickey,password).":                                                               "E_TARGET_AUTH",
+		"No ED25519 host key is known for laptop and you have requested strict checking.\r\nHost key verification failed.": "E_TARGET_AUTH",
+		"ssh: connect to host laptop port 22: Connection refused":                                                          "E_TARGET_UNAVAILABLE",
+		"ssh: connect to host laptop port 22: Operation timed out":                                                         "E_TARGET_UNAVAILABLE",
+	} {
+		err := transport.classify(&CommandError{Cause: exit, Diagnostics: diagnostic})
+		if err == nil || otgerror.Public(err).Code != want {
+			t.Fatalf("%q: %v", diagnostic, err)
+		}
+	}
+	missing := exec.Command("sh", "-c", "exit 127").Run()
+	if err := transport.classify(&CommandError{Cause: missing}); err == nil || !strings.Contains(err.Error(), "device install") {
+		t.Fatalf("missing remote binary: %v", err)
+	}
+	other := exec.Command("sh", "-c", "exit 3").Run()
+	if err := transport.classify(&CommandError{Cause: other, Diagnostics: "permission denied"}); err != nil {
+		t.Fatalf("ordinary peer failure was rewritten: %v", err)
+	}
+}
