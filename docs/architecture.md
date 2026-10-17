@@ -1,4 +1,4 @@
-# ONTHEGO 0.3 architecture
+# ONTHEGO architecture
 
 ONTHEGO transfers unfinished work and native coding-agent histories directly between personal devices. Git owns workspace state. SSH provides reachability and authenticated pairing. No ONTHEGO service or relay participates.
 
@@ -24,6 +24,8 @@ Private state is keyed by canonical project path and project ID. The current bas
 
 Exports first create pending receipts. The authenticated recipient's status can promote a pending receipt after an acknowledgment was lost. Reapplying the same snapshot is idempotent, even if the destination has since been edited. Offline return transfers can use pending WIP ancestors. Pending receipts expire after 30 days and are limited to 64 per workspace. Corresponding `refs/onthego/pending/<snapshotID>` refs keep WIP objects reachable until acknowledgment or expiry, and never enter bundle ref advertisements.
 
+`sync` reads the local receipt and the device's receipt through `peer status` and only moves work away from a side that has not changed since their shared snapshot. When the snapshots differ, the active-device marker tells which side handed its work off. Two changed sides are never merged; the user chooses `push --replace` or `pull --replace`.
+
 Workspace fingerprints and session fingerprints have different purposes. Session changes are shown in status but do not make a workspace transfer fail. Session conflicts have their own preservation policy.
 
 ## Native histories
@@ -43,6 +45,8 @@ Agent authentication, global databases, and unrelated projects never travel. The
 A device stores host, transport settings, and pinned public identity independently from projects. Project mappings live in `~/.onthego/projects/<id>/peers.yaml`; the default path preserves the source's home-relative location.
 
 Pairing queries `peer hello` and public identity over trusted SSH. The peer pins the sender as part of the same pairing operation. `peer apply --from` resolves its signer locally and does not accept a caller-supplied replacement key. Protocol major version and capabilities are checked before transfer, including `snapshot-v3` and `session-scope`. Errors contain a stable code, message, and optional preserved path.
+
+`device add --install` and `device install` run `uname` over SSH, pick the matching binary (the npm package carries all four platforms next to the running executable), stream it to `~/.local/bin/onthego`, check that it runs, and save that absolute path. SSH failures are classified into `E_TARGET_AUTH` and `E_TARGET_UNAVAILABLE` with the next step in the message. Tailscale pairing reads `tailscale status --json` and stores the MagicDNS name as the SSH host.
 
 SSH host-key checks remain enabled. Existing private SSH keys remain in their original location. Remote executable discovery uses the login shell and saves an absolute executable path.
 
@@ -71,4 +75,4 @@ A local-path device runs the same protocol without SSH. Shared agent homes are d
 
 ## Boundaries
 
-Stop writers during capture and application. ONTHEGO does not merge simultaneous workspace changes. Tailscale is an optional connectivity choice. Continuous synchronization, additional agents, and asynchronous user-owned storage adapters are outside the 0.3 release.
+Stop writers during capture and application. ONTHEGO does not merge simultaneous workspace changes. Tailscale is an optional connectivity choice. Continuous synchronization, additional agents, and asynchronous user-owned storage adapters are out of scope.

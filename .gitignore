@@ -18,3 +18,4 @@ coverage.out
 .vscode/
 *.swp
 *.swo
+.hov/
