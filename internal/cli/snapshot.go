@@ -12,7 +12,7 @@ import (
 )
 
 func (a *app) snapshotCommand() *cobra.Command {
-	c := &cobra.Command{Use: "snapshot", Short: "Create or restore an encrypted offline handoff package"}
+	c := &cobra.Command{Use: "snapshot", Short: "Hand off through an encrypted file instead of SSH"}
 	var output, recipient string
 	var include, secrets []string
 	var dry bool

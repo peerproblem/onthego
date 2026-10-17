@@ -71,7 +71,7 @@ func negotiatePeer(ctx context.Context, d config.Device) (helloResponse, error) 
 		return hello, err
 	}
 	if hello.ProtocolMajor != protocolMajor {
-		return hello, fmt.Errorf("peer protocol %d is incompatible with local protocol %d; update onthego on both machines", hello.ProtocolMajor, protocolMajor)
+		return hello, fmt.Errorf("peer protocol %d is incompatible with local protocol %d; update onthego so both devices run the same version (onthego device install <device> copies this one)", hello.ProtocolMajor, protocolMajor)
 	}
 	for _, required := range protocolCapabilities {
 		found := false
@@ -82,7 +82,7 @@ func negotiatePeer(ctx context.Context, d config.Device) (helloResponse, error) 
 			}
 		}
 		if !found {
-			return hello, fmt.Errorf("peer lacks %s; update onthego on the peer", required)
+			return hello, fmt.Errorf("peer lacks %s; update onthego on the peer (onthego device install <device> copies this version)", required)
 		}
 	}
 	return hello, nil

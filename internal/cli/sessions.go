@@ -7,7 +7,7 @@ import (
 )
 
 func (a *app) sessionsCommand() *cobra.Command {
-	c := &cobra.Command{Use: "sessions", Short: "Recover native agent histories from a preserved handoff"}
+	c := &cobra.Command{Use: "sessions", Short: "Retry importing agent sessions after a partial handoff"}
 	var policy string
 	recover := &cobra.Command{Use: "recover", Args: cobra.NoArgs, Short: "Retry only native session import without changing workspace files", RunE: func(c *cobra.Command, _ []string) error {
 		if err := validateSessionPolicy(policy); err != nil {
