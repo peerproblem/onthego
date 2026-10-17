@@ -5,45 +5,63 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
-  html, body { margin: 0; width: 1600px; height: 600px; overflow: hidden; background: #fff; }
-  body { position: relative; color: #0b0b0c; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; }
-  .logo { position: absolute; left: 80px; top: 64px; font-weight: 700; font-size: 34px; letter-spacing: -.05em; display: flex; align-items: center; gap: 10px; }
-  .logo i { width: 18px; height: 18px; border-radius: 50%; background: #d6ff3c; border: 3px solid #0b0b0c; display: inline-block; }
-  h1 { position: absolute; left: 76px; top: 140px; margin: 0; font-weight: 700; font-size: 136px; line-height: .9; letter-spacing: -.065em; width: 860px; }
-  h1 span { color: #2a55ff; }
-  .term { position: absolute; right: 80px; top: 92px; width: 560px; border: 3px solid #0b0b0c; border-radius: 22px; background: #0b0b0c; box-shadow: 9px 9px 0 #0b0b0c; overflow: hidden; }
-  .bar { background: #fff; border-bottom: 3px solid #0b0b0c; padding: 14px 18px; display: flex; gap: 9px; align-items: center; font-weight: 700; font-size: 16px; }
-  .bar i { width: 14px; height: 14px; border-radius: 50%; border: 2.5px solid #0b0b0c; display: inline-block; }
-  .bar i:nth-child(1) { background: #ff6a2b; } .bar i:nth-child(2) { background: #d6ff3c; } .bar i:nth-child(3) { background: #b9e6ff; }
-  .bar span { margin-left: 8px; }
-  .body { padding: 20px 24px 26px; font: 500 18px/1.75 "JetBrains Mono", monospace; color: #f4f4f2; }
-  .c::before { content: "$ "; color: #8b8b93; }
-  .dim { color: #8b8b93; } .ok { color: #d6ff3c; } .bl { color: #9fb4ff; }
-  .pill { display: inline-block; font: 700 14px/1 "Helvetica Neue", Helvetica, Arial; padding: 6px 10px; border-radius: 999px; background: #d6ff3c; color: #0b0b0c; margin: 4px 6px 0 0; }
-  .pill.s { background: #b9e6ff; } .pill.o { background: #ff6a2b; }
-  .stk { position: absolute; border: 3px solid #0b0b0c; box-shadow: 5px 5px 0 #0b0b0c; font-weight: 700; letter-spacing: -.03em; }
-  .circle { width: 140px; height: 140px; border-radius: 50%; background: #ffb3e1; left: 880px; top: 360px; display: grid; place-items: center; font-size: 34px; transform: rotate(-12deg); }
-  .p1 { right: 330px; bottom: 74px; background: #d6ff3c; border-radius: 999px; padding: 12px 20px; font-size: 24px; transform: rotate(-5deg); }
-  .p2 { right: 96px; bottom: 96px; background: #ff6a2b; border-radius: 999px; padding: 12px 20px; font-size: 24px; transform: rotate(4deg); }
+  :root { --text: #1d1d1f; --muted: #6e6e73; --blue: #0071e3; --green: #34c759;
+    --sf: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --mono: "SF Mono", ui-monospace, Menlo, monospace; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1600px; height: 600px; overflow: hidden; }
+  body { position: relative; background: linear-gradient(180deg, #fff 0%, #f5f5f7 100%); color: var(--text); font-family: var(--sf); -webkit-font-smoothing: antialiased; }
+  .logo { position: absolute; left: 96px; top: 76px; display: flex; align-items: center; gap: 10px; font: 600 26px var(--sf); letter-spacing: -.015em; }
+  .logo svg { width: 32px; height: 32px; }
+  h1 { position: absolute; left: 92px; top: 168px; font: 700 74px/1.02 var(--sf); letter-spacing: -.047em; }
+  h1 span { display: block; }
+  .sub { position: absolute; left: 96px; top: 348px; width: 620px; font: 500 26px/1.35 var(--sf); color: var(--muted); letter-spacing: -.012em; }
+  .sub b { color: var(--text); font-weight: 600; }
+  .cmd { position: absolute; left: 96px; top: 462px; display: inline-flex; align-items: center; gap: 12px; background: #fff; border: 1px solid #e3e3e6; border-radius: 14px; padding: 12px 18px; font: 500 21px var(--mono); box-shadow: 0 6px 18px -10px rgba(0,0,0,.2); }
+  .cmd .p { color: #8e8e93; }
+
+  .win { position: absolute; background: #fff; border-radius: 16px; overflow: hidden; box-shadow: 0 30px 60px -24px rgba(0,0,0,.28), 0 0 0 1px rgba(0,0,0,.06); }
+  .bar { height: 40px; display: flex; align-items: center; gap: 7px; padding: 0 16px; background: #f2f2f4; border-bottom: 1px solid #e3e3e6; }
+  .bar i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .bar i:nth-child(1) { background: #ff5f57; } .bar i:nth-child(2) { background: #febc2e; } .bar i:nth-child(3) { background: #28c840; }
+  .bar span { margin: 0 auto; transform: translateX(-24px); font: 600 14px var(--sf); color: var(--muted); }
+  .desk { left: 950px; top: 70px; width: 500px; height: 290px; }
+  .term { padding: 18px 22px; font: 500 16px/1.7 var(--mono); white-space: pre; }
+  .term .p { color: #8e8e93; } .term .g { color: #1a8a3a; } .term .r { color: #c4302b; } .term .b { color: var(--blue); } .term .k { font-weight: 700; }
+  .lap { left: 1100px; top: 300px; width: 430px; height: 236px; }
+  .chat { padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 86%; padding: 11px 16px; border-radius: 20px; font: 500 19px/1.32 var(--sf); letter-spacing: -.01em; }
+  .me { align-self: flex-end; background: var(--blue); color: #fff; border-bottom-right-radius: 6px; }
+  .ai { align-self: flex-start; background: #ececf0; border-bottom-left-radius: 6px; }
+  .island { position: absolute; left: 870px; top: 440px; display: flex; align-items: center; gap: 12px; background: #000; color: #fff; border-radius: 999px; padding: 9px 14px 9px 9px; box-shadow: 0 14px 30px -12px rgba(0,0,0,.45); }
+  .island .ico { width: 34px; height: 34px; border-radius: 10px; background: var(--green); display: grid; place-items: center; }
+  .island .ico svg { width: 20px; height: 20px; }
+  .island b { font: 600 17px var(--sf); }
 </style>
 </head>
 <body>
-  <div class="logo">onthego<i></i></div>
-  <h1>Your work goes <span>where you go.</span></h1>
-    <div class="term">
-    <div class="bar"><i></i><i></i><i></i><span>desktop: ~/projects/shop</span></div>
-    <div class="body">
-      <div class="c">onthego sync laptop</div>
-      <div class="dim">Sync: push (this device has new work)</div>
-      <div><span class="ok">Sent to laptop</span> → ~/projects/shop</div>
-      <div><span class="pill">staged ✓</span><span class="pill s">unstaged ✓</span><span class="pill">untracked ✓</span><span class="pill o">codex session ✓</span></div>
-      <div class="bl">Resume: codex resume 0199a88c</div>
+  <div class="logo"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="#1d1d1f"/><path d="M7.5 12.2h8.2M13 8.6l3.6 3.6L13 15.8" fill="none" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>onthego</div>
+  <h1><span>Start on your desktop.</span><span>Finish on your laptop.</span></h1>
+  <p class="sub">Your uncommitted work and your <b>Codex</b> and <b>Claude Code</b> sessions, moved to your other machine.</p>
+  <div class="cmd"><span class="p">%</span> onthego sync laptop</div>
+
+  <div class="win desk">
+    <div class="bar"><i></i><i></i><i></i><span>shop &#8212; desktop</span></div>
+<div class="term"><span class="p">%</span> git status --short
+<span class="g">M</span>  src/checkout.ts
+ <span class="r">M</span> src/retry.ts
+<span class="p">%</span> <span class="k">onthego sync laptop</span>
+Sent to laptop &#8594; ~/projects/shop
+<span class="b">Resume: codex resume 0199a88c</span></div>
+  </div>
+  <div class="win lap">
+    <div class="bar"><i></i><i></i><i></i><span>shop &#8212; laptop</span></div>
+    <div class="chat">
+      <div class="msg me">ok, where were we?</div>
+      <div class="msg ai">The retry key is in checkout.ts. Refund tests are next.</div>
     </div>
   </div>
-  <div class="stk circle">1 cmd</div>
-  <div class="stk p1">no account</div>
-  <div class="stk p2">no server</div>
+  <div class="island"><span class="ico"><svg viewBox="0 0 20 20"><rect x="3" y="5" width="14" height="9" rx="1.6" fill="none" stroke="#fff" stroke-width="1.8"/><path d="M1.5 16h17" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></svg></span><b>Sent to laptop</b></div>
 </body>
 </html>

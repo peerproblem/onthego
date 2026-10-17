@@ -1,20 +1,20 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/peerproblem/onthego/main/assets/onthego-banner.png" alt="onthego moves your Git workspace and agent sessions between your desktop, laptop, and VPS" width="100%">
+  <img src="https://raw.githubusercontent.com/peerproblem/onthego/main/assets/onthego-banner.png" alt="Start on your desktop. Finish on your laptop. onthego moves your uncommitted work and your Codex and Claude Code sessions to your other machine." width="100%">
 </p>
 
-<h3 align="center">Desk to couch to café to server. Your work comes along.</h3>
+<h3 align="center">Start on your desktop. Finish on your laptop.</h3>
 
 <p align="center">
-  One command moves an unfinished Git workspace <b>and</b> its Codex and Claude Code sessions<br>
-  between your own desktop, laptop, and VPS. Pick up the same conversation where you left it.
+  onthego copies your uncommitted work and your Codex and Claude Code sessions<br>
+  to your other machine. Then you pick up the same session there.
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@jbaehova/onthego"><img alt="npm" src="https://img.shields.io/npm/v/%40jbaehova%2Fonthego?style=for-the-badge&color=0b0b0c&labelColor=d6ff3c&label=npm"></a>
-  <a href="https://github.com/peerproblem/onthego/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/peerproblem/onthego/ci.yml?branch=main&style=for-the-badge&labelColor=b9e6ff&color=0b0b0c&label=ci"></a>
-  <img alt="macOS and Linux" src="https://img.shields.io/badge/macOS%20%2B%20Linux-0b0b0c?style=for-the-badge">
-  <img alt="No account, no server" src="https://img.shields.io/badge/no%20account-no%20server-ff6a2b?style=for-the-badge&labelColor=0b0b0c">
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-ffb3e1?style=for-the-badge&labelColor=0b0b0c"></a>
+  <a href="https://www.npmjs.com/package/@jbaehova/onthego"><img alt="npm" src="https://img.shields.io/npm/v/%40jbaehova%2Fonthego?style=flat-square&color=1d1d1f&label=npm"></a>
+  <a href="https://github.com/peerproblem/onthego/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/peerproblem/onthego/ci.yml?branch=main&style=flat-square&label=ci"></a>
+  <img alt="macOS and Linux" src="https://img.shields.io/badge/macOS%20%2B%20Linux-1d1d1f?style=flat-square">
+  <img alt="No account, no server" src="https://img.shields.io/badge/no%20account%2C%20no%20server-0071e3?style=flat-square">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-1d1d1f?style=flat-square"></a>
 </p>
 
 <p align="center">
@@ -36,14 +36,16 @@ onthego sync laptop
 
 That's the whole idea. Staged, unstaged, and untracked work arrives exactly as you left it, together with this project's agent sessions. On the other device, run `codex resume` or `claude --resume` and keep talking.
 
-## Why onthego
+## How it works
 
 | | |
 | :-- | :-- |
-| 🧠 **Nothing to explain twice** | Agent sessions travel with the code, so the next device continues the same conversation. |
-| 🧹 **No "wip!!" commits** | The working tree, the index, and untracked files arrive as they were. Your history stays clean. |
-| 🏠 **Each machine stays itself** | `node_modules`, caches, Git config, hooks, and agent logins are never overwritten. |
-| 🔒 **Yours, end to end** | Devices talk over your own SSH. No account, no relay, no AI. Just a small open-source CLI. |
+| **Capture** | Staged, unstaged, and untracked files, plus this project's recent agent sessions. Your `.env` stays put. |
+| **Encrypt** | Each handoff is encrypted for the receiving device and signed by the sender. |
+| **Send** | Over your own SSH. Same Wi-Fi, Tailscale, or a VPS. No account, no relay. |
+| **Resume** | Run `codex resume` or `claude --resume` on the other machine. Same conversation. |
+
+Your Git history stays clean, with no "wip" commits. `node_modules`, caches, Git config, hooks, and agent logins stay on each machine.
 
 ## Install
 
@@ -318,8 +320,6 @@ onthego device install laptop                           # repeat for each SSH de
 | [Development](docs/development.md) | Tests, demos, end-to-end checks, benchmarks, and releasing. |
 
 Handoffs are explicit on purpose: you always know which device has the work. Continuous background synchronization is out of scope.
-
-<p align="center"><b>Pack up. Move on.</b></p>
 
 ## License
 

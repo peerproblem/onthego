@@ -5,24 +5,32 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
-  html, body { margin: 0; width: 1600px; height: 520px; overflow: hidden; background: #fff; }
-  body { color: #0b0b0c; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; display: grid; grid-template-columns: repeat(3, 1fr); gap: 34px; padding: 50px 64px 60px; box-sizing: border-box; }
-  .t { border: 3px solid #0b0b0c; border-radius: 28px; box-shadow: 9px 9px 0 #0b0b0c; padding: 30px 32px; display: flex; flex-direction: column; }
-  .t:nth-child(1) { background: #b9e6ff; transform: rotate(-1.4deg); }
-  .t:nth-child(2) { background: #d6ff3c; transform: rotate(1deg); }
-  .t:nth-child(3) { background: #ff6a2b; transform: rotate(-.8deg); }
-  .g { font-weight: 700; font-size: 130px; line-height: .8; letter-spacing: -.08em; margin-bottom: auto; }
-  .v { align-self: flex-start; background: #0b0b0c; color: #fff; font: 700 20px/1 "JetBrains Mono", monospace; padding: 8px 14px; border-radius: 999px; margin: 24px 0 16px; }
-  h3 { margin: 0 0 10px; font-size: 38px; line-height: 1; letter-spacing: -.05em; }
-  p { margin: 0; font-size: 21px; line-height: 1.35; letter-spacing: -.01em; }
-  code { font: 700 18px "JetBrains Mono", monospace; background: rgba(255,255,255,.6); padding: 1px 6px; border-radius: 6px; }
+  :root { --text: #1d1d1f; --muted: #6e6e73; --sf: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, system-ui, sans-serif; --mono: "SF Mono", ui-monospace, Menlo, monospace; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1600px; height: 520px; overflow: hidden; }
+  body { background: #f5f5f7; color: var(--text); font-family: var(--sf); -webkit-font-smoothing: antialiased; display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; padding: 56px 72px; }
+  .t { background: #fff; border-radius: 28px; padding: 36px 36px 34px; display: flex; flex-direction: column; }
+  .ic { width: 64px; height: 64px; border-radius: 18px; display: grid; place-items: center; margin-bottom: auto; }
+  .ic svg { width: 32px; height: 32px; }
+  .v { align-self: flex-start; font: 600 17px var(--mono); color: var(--muted); background: #f2f2f4; border-radius: 8px; padding: 5px 10px; margin-bottom: 14px; }
+  h3 { font: 700 38px/1.05 var(--sf); letter-spacing: -.035em; margin-bottom: 12px; }
+  p { font: 500 20px/1.4 var(--sf); color: var(--muted); letter-spacing: -.01em; }
+  code { font: 600 17px var(--mono); color: var(--text); background: #f2f2f4; border-radius: 6px; padding: 1px 6px; }
 </style>
 </head>
 <body>
-  <div class="t"><div class="g">→</div><span class="v">push</span><h3>Only here changed</h3><p>Your work and its agent sessions go to the other device.</p></div>
-  <div class="t"><div class="g">←</div><span class="v">pull</span><h3>Only there changed</h3><p>It brings everything back. Also when you handed work off.</p></div>
-  <div class="t"><div class="g">✕</div><span class="v">stop</span><h3>Both changed</h3><p>Nothing is merged. Pick <code>push --replace</code> or <code>pull --replace</code>; a backup is kept.</p></div>
+  <div class="t">
+    <div class="ic" style="background:#0071e3"><svg viewBox="0 0 32 32"><path d="M7 16h17M18 9.5l6.5 6.5-6.5 6.5" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+    <span class="v">push</span><h3>Only here changed</h3><p>Your work and its agent sessions go to the other device.</p>
+  </div>
+  <div class="t">
+    <div class="ic" style="background:#34c759"><svg viewBox="0 0 32 32"><path d="M25 16H8M14 9.5L7.5 16l6.5 6.5" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+    <span class="v">pull</span><h3>Only there changed</h3><p>It brings everything back. Also when you handed work off.</p>
+  </div>
+  <div class="t">
+    <div class="ic" style="background:#1d1d1f"><svg viewBox="0 0 32 32"><path d="M10 10l12 12M22 10L10 22" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg></div>
+    <span class="v">stop</span><h3>Both changed</h3><p>Nothing is merged. Pick <code>push --replace</code> or <code>pull --replace</code>. A backup is kept.</p>
+  </div>
 </body>
 </html>
