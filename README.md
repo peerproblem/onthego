@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/peerproblem/onthego/main/assets/onthego-banner.png" alt="Start on your desktop. Finish on your laptop. onthego moves your uncommitted work and your Codex and Claude Code sessions to your other machine." width="100%">
+  <img src="https://raw.githubusercontent.com/peerproblem/onthego/main/assets/onthego-hero.png" alt="Start on your desktop. Finish on your laptop. onthego moves your uncommitted work and your Codex and Claude Code sessions to your other machine." width="100%">
 </p>
 
 <h3 align="center">Start on your desktop. Finish on your laptop.</h3>
@@ -105,7 +105,7 @@ onthego sync laptop
 ## How `sync` decides
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/peerproblem/onthego/main/assets/onthego-sync.png" alt="sync pushes when only this side changed, pulls when only the other side changed, and stops when both changed" width="100%">
+  <img src="https://raw.githubusercontent.com/peerproblem/onthego/main/assets/onthego-sync-decision.png" alt="sync pushes when only this side changed, pulls when only the other side changed, and stops when both changed" width="100%">
 </p>
 
 `sync` compares both sides with their last handoff and only moves work away from the side that has not changed.
